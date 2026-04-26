@@ -7,6 +7,7 @@ from torchvision import transforms
 from torchvision.io import write_video
 from einops import rearrange
 import torch.distributed as dist
+from huggingface_hub import hf_hub_download
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
@@ -18,6 +19,15 @@ from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
 
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
+
+
+def resolve_checkpoint_path(spec: str) -> str:
+    """Resolve --checkpoint_path. Supports a local path or `hf:repo_id:filename`."""
+    if spec.startswith("hf:"):
+        _, repo_id, filename = spec.split(":", 2)
+        return hf_hub_download(repo_id, filename)
+    return spec
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, help="Path to the config file")
@@ -67,6 +77,7 @@ else:
     pipeline = CausalDiffusionInferencePipeline(config, device=device)
 
 if args.checkpoint_path:
+    args.checkpoint_path = resolve_checkpoint_path(args.checkpoint_path)
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
     pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'])
 
@@ -134,19 +145,20 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     num_generated_frames = 0  # Number of generated (latent) frames
 
     if args.i2v:
-        # For image-to-video, batch contains image and caption
-        prompt = batch['prompts'][0]  # Get caption from batch
+        # For image-to-video, batch['image'] is (B, C, T, H, W) where T is the
+        # number of input pixel frames (1 for plain I2V, multiple for video extension).
+        prompt = batch['prompts'][0]
         prompts = [prompt] * args.num_samples
 
-        # Process the image
-        image = batch['image'].squeeze(0).unsqueeze(0).unsqueeze(2).to(device=device, dtype=torch.bfloat16)
+        image = batch['image'].to(device=device, dtype=torch.bfloat16)
 
-        # Encode the input image as the first latent
         initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=torch.bfloat16)
         initial_latent = initial_latent.repeat(args.num_samples, 1, 1, 1, 1)
+        num_input_latents = initial_latent.shape[1]
 
         sampled_noise = torch.randn(
-            [args.num_samples, args.num_output_frames - 1, 16, 60, 104], device=device, dtype=torch.bfloat16
+            [args.num_samples, args.num_output_frames - num_input_latents, 16, 60, 104],
+            device=device, dtype=torch.bfloat16
         )
     else:
         # For text-to-video, batch is just the text prompt

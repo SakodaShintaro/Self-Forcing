@@ -167,9 +167,10 @@ class TextImagePairDataset(Dataset):
 
         # Verify all images exist
         for item in self.metadata:
-            image_path = self.image_dir / item['file_name']
-            if not image_path.exists():
-                raise FileNotFoundError(f"Image not found: {image_path}")
+            for name in (item['file_names'] if 'file_names' in item else [item['file_name']]):
+                image_path = self.image_dir / name
+                if not image_path.exists():
+                    raise FileNotFoundError(f"Image not found: {image_path}")
 
         self.dummy_prompt = "DUMMY PROMPT"
         self.pre_pad_len = len(self.metadata)
@@ -185,23 +186,20 @@ class TextImagePairDataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns:
-            dict: A dictionary containing:
-                - image: PIL Image
-                - caption: str
-                - target_bbox: list of int [x1, y1, x2, y2]
-                - target_ratio: str
-                - type: str
-                - origin_size: tuple of int (width, height)
+            dict with key 'image' shaped (C, T, H, W). T == 1 for plain
+            single-frame I2V; T > 1 when the metadata entry has `file_names`
+            (a list) for multi-frame video extension.
         """
         item = self.metadata[idx]
 
-        # Load image
-        image_path = self.image_dir / item['file_name']
-        image = Image.open(image_path).convert('RGB')
-
-        # Apply transform if specified
-        if self.transform:
-            image = self.transform(image)
+        file_names = (item['file_names'] if 'file_names' in item else [item['file_name']])
+        frames = []
+        for name in file_names:
+            img = Image.open(self.image_dir / name).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            frames.append(img)
+        image = torch.stack(frames, dim=1)  # (C, T, H, W)
 
         return {
             'image': image,
