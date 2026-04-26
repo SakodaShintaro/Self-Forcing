@@ -105,9 +105,17 @@ class StreamingPredictor:
 
     Usage:
         sp = StreamingPredictor(pipeline, conditional_dict, device)
-        sp.initialize(initial_9_frames)        # seed KV cache with 3 sensor latents
+        sp.initialize(initial_9_frames)
+        pixel_preds = [sp.predict_and_decode()]
         for new_12_frames in sensor_stream:
-            prediction = sp.step(new_12_frames)  # inject sensor, generate one prediction
+            sp.ingest(new_12_frames)
+            pixel_preds.append(sp.predict_and_decode())
+        sp.finish()
+
+    Both `ingest` and `predict_and_decode` use the VAE's incremental causal cache
+    (`cached_decode`), so each call processes only the latents handed to it. The
+    decoder cache snapshot is saved/restored around prediction decoding so the
+    cache reflects only real sensor history (predictions never pollute it).
     """
 
     def __init__(self, pipeline, conditional_dict, device: torch.device):
@@ -119,69 +127,89 @@ class StreamingPredictor:
         self.context_noise = int(getattr(pipeline.args, "context_noise", 0))
 
         self.current_start_frame = 0
-        self.accumulated_latents: list[torch.Tensor] = []
         self.encode_times: list[float] = []
-        self.step_times: list[float] = []
+        self.predict_times: list[float] = []
+        self.decode_times: list[float] = []
+        self.advance_dec_times: list[float] = []
 
     def initialize(self, initial_pixels: torch.Tensor) -> None:
-        """Seed VAE encoder + KV cache from the first 9 px frames."""
+        """Seed KV cache + VAE encoder/decoder caches from the first 9 px frames."""
         assert initial_pixels.shape[2] == INITIAL_PX_FRAMES, (
             f"initial_pixels expects {INITIAL_PX_FRAMES} frames, got {initial_pixels.shape[2]}"
         )
-        self.pipeline._initialize_kv_cache(batch_size=self.batch_size, dtype=self.dtype, device=self.device)
-        self.pipeline._initialize_crossattn_cache(batch_size=self.batch_size, dtype=self.dtype, device=self.device)
+        self.pipeline._initialize_kv_cache(
+            batch_size=self.batch_size, dtype=self.dtype, device=self.device,
+        )
+        self.pipeline._initialize_crossattn_cache(
+            batch_size=self.batch_size, dtype=self.dtype, device=self.device,
+        )
         self.pipeline.vae.model.clear_cache()
         self.current_start_frame = 0
-        self.accumulated_latents = []
         self.encode_times = []
-        self.step_times = []
+        self.predict_times = []
+        self.decode_times = []
+        self.advance_dec_times = []
 
         latents = self._encode(initial_pixels)
-        self.accumulated_latents.append(latents)
         self._inject(latents)
         self.current_start_frame += INITIAL_LATENTS
+        self._advance_decoder(latents)
 
-    def step(self, new_pixels: torch.Tensor) -> torch.Tensor:
-        """Streaming tick: encode 12 incoming frames, inject into KV, predict 1 block.
-
-        new_pixels: (1, C, 12, H, W). Returns the predicted 3 latents.
-        """
+    def ingest(self, new_pixels: torch.Tensor) -> None:
+        """A new 12-frame sensor block has arrived: encode, inject into KV, advance decoder."""
         assert new_pixels.shape[2] == FRAMES_PER_BLOCK, (
-            f"step expects {FRAMES_PER_BLOCK} frames per call, got {new_pixels.shape[2]}"
+            f"ingest expects {FRAMES_PER_BLOCK} frames, got {new_pixels.shape[2]}"
         )
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-
-        # 1. Sensor arrives: encode + inject into KV at the slot of the *next* prediction
         new_latents = self._encode(new_pixels)
-        self.accumulated_latents.append(new_latents)
         self._inject(new_latents)
         self.current_start_frame += LATENTS_PER_BLOCK
+        self._advance_decoder(new_latents)
 
-        # 2. Predict the next 0.75s
-        prediction = self._predict()
+    def predict_and_decode(self) -> torch.Tensor:
+        """Generate the next 0.75s prediction and decode it incrementally.
 
+        Returns (T_pixel, C, H, W) in [0, 1]. T_pixel = 12 (= 3 latents × 4 px each).
+        The decoder cache is saved/restored so the prediction does not pollute the
+        sensor-only context that subsequent ingests will build on.
+        """
         torch.cuda.synchronize()
-        self.step_times.append(time.perf_counter() - t0)
-        return prediction
-
-    def step_initial(self) -> torch.Tensor:
-        """Variant of step() that produces the very first prediction (no sensor injection
-        beyond the initial seed). Used because at k=0 we predict before any new sensor has
-        arrived past the seed window."""
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+        t_p = time.perf_counter()
         prediction = self._predict()
         torch.cuda.synchronize()
-        self.step_times.append(time.perf_counter() - t0)
-        return prediction
+        self.predict_times.append(time.perf_counter() - t_p)
 
-    @property
-    def all_sensor_latents(self) -> torch.Tensor:
-        return torch.cat(self.accumulated_latents, dim=1)
+        saved_feat_map = [
+            t.clone() if isinstance(t, torch.Tensor) else t
+            for t in self.pipeline.vae.model._feat_map
+        ]
+
+        torch.cuda.synchronize()
+        t_d = time.perf_counter()
+        decoded = self.pipeline.vae.decode_to_pixel(prediction, use_cache=True)
+        decoded = (decoded * 0.5 + 0.5).clamp(0, 1)
+        torch.cuda.synchronize()
+        self.decode_times.append(time.perf_counter() - t_d)
+
+        feat_map = self.pipeline.vae.model._feat_map
+        for i in range(len(feat_map)):
+            feat_map[i] = saved_feat_map[i]
+
+        return decoded[0]
 
     def finish(self) -> None:
         self.pipeline.vae.model.clear_cache()
+
+    # --- internal helpers -------------------------------------------------
+
+    def _advance_decoder(self, sensor_latents: torch.Tensor) -> None:
+        """Push real sensor latents through the decoder so its causal cache stays in
+        sync with the actual past. Output pixels are discarded (left panel of the
+        side-by-side video uses the original sensor PNGs)."""
+        torch.cuda.synchronize()
+        t = time.perf_counter()
+        _ = self.pipeline.vae.decode_to_pixel(sensor_latents, use_cache=True)
+        torch.cuda.synchronize()
+        self.advance_dec_times.append(time.perf_counter() - t)
 
     # --- internal helpers -------------------------------------------------
 
@@ -240,22 +268,6 @@ class StreamingPredictor:
                     ),
                 ).unflatten(0, denoised_pred.shape[:2])
         return denoised_pred.detach().clone()
-
-
-def decode_prediction_block(pipeline, all_sensor_latents: torch.Tensor,
-                            prediction: torch.Tensor, block_idx: int) -> torch.Tensor:
-    """Decode a 3-latent prediction in the context of all preceding sensor latents.
-
-    Returns (12, C, H, W) in [0, 1].
-    """
-    end_slot = INITIAL_LATENTS + LATENTS_PER_BLOCK * block_idx
-    context = all_sensor_latents[:, :end_slot]
-    full_seq = torch.cat([context, prediction], dim=1)
-    pipeline.vae.model.clear_cache()
-    decoded = pipeline.vae.decode_to_pixel(full_seq, use_cache=False)
-    pipeline.vae.model.clear_cache()
-    decoded = (decoded * 0.5 + 0.5).clamp(0, 1)  # (1, T_px, C, H, W)
-    return decoded[0, -FRAMES_PER_BLOCK:]
 
 
 def main() -> None:
@@ -336,37 +348,37 @@ def main() -> None:
     print(f"Streaming inference: {num_pred_blocks} blocks (Δt={args.delta_t}s)")
     predictor = StreamingPredictor(pipeline, conditional_dict, device)
 
-    # Seed: encode first 9 frames and inject into KV cache, then make the first
-    # prediction directly on the seed (no new sensor has arrived yet).
+    # Seed: encode first 9 frames, inject into KV, prime decoder cache, then make
+    # the first prediction directly on the seed (no new sensor has arrived yet).
     predictor.initialize(sensor_tensor[:, :, :INITIAL_PX_FRAMES])
-    predictions: list[torch.Tensor] = [predictor.step_initial()]
+    decoded_blocks: list[torch.Tensor] = [predictor.predict_and_decode()]
 
     # Streaming loop: each iteration ingests the next 12 px frames and predicts.
     last_ingest_start = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * (num_pred_blocks - 1)
     for start_px in range(INITIAL_PX_FRAMES, last_ingest_start, FRAMES_PER_BLOCK):
-        new_pixels = sensor_tensor[:, :, start_px:start_px + FRAMES_PER_BLOCK]
-        predictions.append(predictor.step(new_pixels))
+        predictor.ingest(sensor_tensor[:, :, start_px:start_px + FRAMES_PER_BLOCK])
+        decoded_blocks.append(predictor.predict_and_decode())
     predictor.finish()
 
-    block_times = predictor.step_times
     encode_times = predictor.encode_times
-    all_sensor_latents = predictor.all_sensor_latents
-
-    avg_block = sum(block_times) / len(block_times)
-    avg_enc = sum(encode_times) / len(encode_times)
+    predict_times = predictor.predict_times
+    decode_times = predictor.decode_times
+    advance_times = predictor.advance_dec_times
+    block_times = [
+        predict_times[k] + decode_times[k]
+        + (encode_times[k] + advance_times[k] if k < len(encode_times) and k > 0 else 0)
+        for k in range(num_pred_blocks)
+    ]
     print(
-        f"  blocks total {sum(block_times):.2f}s | per-block {avg_block:.2f}s\n"
         f"  encode total {sum(encode_times):.2f}s ({len(encode_times)} calls, "
-        f"per-call {avg_enc:.3f}s)"
+        f"per-call {sum(encode_times)/len(encode_times):.3f}s)\n"
+        f"  predict total {sum(predict_times):.2f}s ({len(predict_times)} calls, "
+        f"per-call {sum(predict_times)/len(predict_times):.3f}s)\n"
+        f"  decode (pred) total {sum(decode_times):.2f}s "
+        f"per-call {sum(decode_times)/len(decode_times):.3f}s\n"
+        f"  decode (sensor advance) total {sum(advance_times):.2f}s "
+        f"per-call {sum(advance_times)/len(advance_times):.3f}s"
     )
-
-    print("Decoding prediction blocks...")
-    decoded_blocks: list[torch.Tensor] = []
-    decode_start = time.perf_counter()
-    for k, pred in enumerate(predictions):
-        decoded_blocks.append(decode_prediction_block(pipeline, all_sensor_latents, pred, k))
-    decode_time = time.perf_counter() - decode_start
-    print(f"  decode {decode_time:.2f}s ({decode_time / len(decoded_blocks):.2f}s/block)")
 
     composed: list[np.ndarray] = []
     for k, pred_block in enumerate(decoded_blocks):
@@ -414,6 +426,7 @@ def main() -> None:
     write_video(str(args.output), out, fps=args.output_fps)
 
     sensor_dt = FRAMES_PER_BLOCK / SOURCE_FPS  # 0.75s per block
+    avg_block = sum(block_times) / len(block_times)
     print(
         f"\nWrote {args.output} ({len(composed)} frames @ {args.output_fps} fps)\n"
         f"Per-block wall {avg_block:.2f}s vs sensor {sensor_dt:.2f}s "
