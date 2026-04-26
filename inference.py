@@ -1,16 +1,21 @@
 import argparse
-import torch
 import os
-from omegaconf import OmegaConf
-from tqdm import tqdm
-from torchvision import transforms
-from torchvision.io import write_video
-from einops import rearrange
+import time
+
+import cv2
+import numpy as np
+import torch
 import torch.distributed as dist
+from einops import rearrange
 from huggingface_hub import hf_hub_download
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from torchvision import transforms
+from torchvision.io import write_video
+from tqdm import tqdm
 
+from demo_utils.memory import DynamicSwapInstaller, get_cuda_free_memory_gb, gpu
 from pipeline import (
     CausalDiffusionInferencePipeline,
     CausalInferencePipeline,
@@ -18,7 +23,27 @@ from pipeline import (
 from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
 
-from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
+
+def annotate_video(video_thwc: torch.Tensor, num_context_pixel_frames: int,
+                   gen_seconds: float, gen_pixel_fps: float) -> torch.Tensor:
+    """Draw 'context'/'generated' label (top-left) and timing info (bottom-left)
+    onto each frame of a (T, H, W, C) RGB tensor in [0, 255]."""
+    arr = video_thwc.numpy().astype(np.uint8).copy()
+    T, H, _, _ = arr.shape
+    info = f"gen {gen_pixel_fps:.2f} fps ({gen_seconds:.2f}s)"
+    for t in range(T):
+        frame = arr[t]
+        label = "context" if t < num_context_pixel_frames else "generated"
+        cv2.putText(frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, info, (16, H - 16), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(frame, info, (16, H - 16), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        arr[t] = frame
+    return torch.from_numpy(arr).float()
 
 
 def resolve_checkpoint_path(spec: str) -> str:
@@ -174,7 +199,10 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
             [args.num_samples, args.num_output_frames, 16, 60, 104], device=device, dtype=torch.bfloat16
         )
 
-    # Generate 81 frames
+    # Generate frames
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t_start = time.perf_counter()
     video, latents = pipeline.inference(
         noise=sampled_noise,
         text_prompts=prompts,
@@ -182,12 +210,31 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         initial_latent=initial_latent,
         low_memory=low_memory,
     )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    gen_seconds = time.perf_counter() - t_start
+
     current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
     all_video.append(current_video)
     num_generated_frames += latents.shape[1]
 
     # Final output video
     video = 255.0 * torch.cat(all_video, dim=1)
+
+    total_pixel_frames = video.shape[1]
+    if args.i2v:
+        num_context_pixel_frames = 1 + 4 * (num_input_latents - 1)
+    else:
+        num_context_pixel_frames = 0
+    num_generated_pixel_frames = total_pixel_frames - num_context_pixel_frames
+    gen_pixel_fps = num_generated_pixel_frames / gen_seconds if gen_seconds > 0 else 0.0
+    gen_latent_fps = (latents.shape[1] - (num_input_latents if args.i2v else 0)) / gen_seconds \
+        if gen_seconds > 0 else 0.0
+    print(
+        f"[gen] {gen_seconds:.2f}s | "
+        f"{num_generated_pixel_frames} px frames generated | "
+        f"{gen_pixel_fps:.2f} px-fps | {gen_latent_fps:.2f} latent-fps"
+    )
 
     # Clear VAE cache
     pipeline.vae.model.clear_cache()
@@ -201,4 +248,10 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
                 output_path = os.path.join(args.output_folder, f'{idx}-{seed_idx}_{model}.mp4')
             else:
                 output_path = os.path.join(args.output_folder, f'{prompt[:100]}-{seed_idx}.mp4')
-            write_video(output_path, video[seed_idx], fps=16)
+            annotated = annotate_video(
+                video[seed_idx],
+                num_context_pixel_frames=num_context_pixel_frames,
+                gen_seconds=gen_seconds,
+                gen_pixel_fps=gen_pixel_fps,
+            )
+            write_video(output_path, annotated, fps=16)
