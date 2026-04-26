@@ -35,11 +35,14 @@ TARGET_W, TARGET_H = 832, 480
 SOURCE_FPS = 16
 LATENTS_PER_BLOCK = 3
 INITIAL_LATENTS = 3
-INITIAL_PX_FRAMES = 9               # 1 + 4*(3-1)
-FRAMES_PER_BLOCK = 12               # 4 px per non-first latent × 3
-KV_CACHE_LATENT_LIMIT = 21          # self_forcing_dmd
+INITIAL_PX_FRAMES = 9  # 1 + 4*(3-1)
+FRAMES_PER_BLOCK = 12  # 4 px per non-first latent × 3
+KV_CACHE_LATENT_LIMIT = 21  # self_forcing_dmd
 
-def fit_letterbox(img: Image.Image, target_w: int = TARGET_W, target_h: int = TARGET_H) -> Image.Image:
+
+def fit_letterbox(
+    img: Image.Image, target_w: int = TARGET_W, target_h: int = TARGET_H
+) -> Image.Image:
     src_w, src_h = img.size
     if (src_w, src_h) == (target_w, target_h):
         return img
@@ -83,10 +86,9 @@ def build_pipeline(args, device: torch.device):
     else:
         pipeline = CausalDiffusionInferencePipeline(config, device=device)
 
-    state_dict = torch.load(resolve_checkpoint(args.checkpoint_path), map_location="cpu")
-    pipeline.generator.load_state_dict(
-        state_dict["generator_ema" if args.use_ema else "generator"]
-    )
+    checkpoint_path = "hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt"
+    state_dict = torch.load(resolve_checkpoint(checkpoint_path), map_location="cpu")
+    pipeline.generator.load_state_dict(state_dict["generator_ema" if args.use_ema else "generator"])
     pipeline = pipeline.to(dtype=torch.bfloat16)
     if low_memory:
         DynamicSwapInstaller.install_model(pipeline.text_encoder, device=gpu)
@@ -135,10 +137,14 @@ class StreamingPredictor:
             f"initial_pixels expects {INITIAL_PX_FRAMES} frames, got {initial_pixels.shape[2]}"
         )
         self.pipeline._initialize_kv_cache(
-            batch_size=self.batch_size, dtype=self.dtype, device=self.device,
+            batch_size=self.batch_size,
+            dtype=self.dtype,
+            device=self.device,
         )
         self.pipeline._initialize_crossattn_cache(
-            batch_size=self.batch_size, dtype=self.dtype, device=self.device,
+            batch_size=self.batch_size,
+            dtype=self.dtype,
+            device=self.device,
         )
         self.pipeline.vae.model.clear_cache()
         self.current_start_frame = 0
@@ -222,7 +228,10 @@ class StreamingPredictor:
     def _inject(self, latents: torch.Tensor) -> None:
         """Write sensor latents into KV cache at current_start_frame slot, timestep=0."""
         timestep = torch.full(
-            [self.batch_size, 1], self.context_noise, dtype=torch.int64, device=self.device,
+            [self.batch_size, 1],
+            self.context_noise,
+            dtype=torch.int64,
+            device=self.device,
         )
         self.pipeline.generator(
             noisy_image_or_video=latents,
@@ -237,7 +246,8 @@ class StreamingPredictor:
         """Run denoising loop at current_start_frame slot. Returns 3 prediction latents."""
         sampled_noise = torch.randn(
             [self.batch_size, LATENTS_PER_BLOCK, 16, 60, 104],
-            device=self.device, dtype=self.dtype,
+            device=self.device,
+            dtype=self.dtype,
         )
         noisy_input = sampled_noise
         denoising_steps = self.pipeline.denoising_step_list
@@ -245,7 +255,8 @@ class StreamingPredictor:
             timestep = torch.full(
                 [self.batch_size, LATENTS_PER_BLOCK],
                 int(current_timestep.item()),
-                device=self.device, dtype=torch.int64,
+                device=self.device,
+                dtype=torch.int64,
             )
             _, denoised_pred = self.pipeline.generator(
                 noisy_image_or_video=noisy_input,
@@ -260,8 +271,11 @@ class StreamingPredictor:
                 noisy_input = self.pipeline.scheduler.add_noise(
                     denoised_pred.flatten(0, 1),
                     torch.randn_like(denoised_pred.flatten(0, 1)),
-                    next_t * torch.ones(
-                        [self.batch_size * LATENTS_PER_BLOCK], device=self.device, dtype=torch.long,
+                    next_t
+                    * torch.ones(
+                        [self.batch_size * LATENTS_PER_BLOCK],
+                        device=self.device,
+                        dtype=torch.long,
                     ),
                 ).unflatten(0, denoised_pred.shape[:2])
         return denoised_pred.detach().clone()
@@ -273,17 +287,17 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config_path", default="configs/self_forcing_dmd.yaml")
     parser.add_argument(
-        "--checkpoint_path",
-        default="hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt",
-    )
-    parser.add_argument(
         "--caption",
         default="First-person dashcam view from a car driving on a CARLA simulated road.",
     )
     parser.add_argument("--start_index", type=int, default=20)
-    parser.add_argument("--num_frames", type=int, default=None,
-                        help="Number of sensor frames to consume. "
-                             "Default: use as many as fit in the KV cache (= 81 frames = 6 blocks).")
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=None,
+        help="Number of sensor frames to consume. "
+        "Default: use as many as fit in the KV cache (= 81 frames = 6 blocks).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--use_ema", action="store_true")
     args = parser.parse_args()
@@ -294,10 +308,12 @@ def main() -> None:
     device = torch.device("cuda")
     pipeline, _ = build_pipeline(args, device)
 
-    normalize = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ])
+    normalize = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),
+        ]
+    )
 
     png_paths = sorted(args.src.glob("*.png"))
     available = len(png_paths) - args.start_index
@@ -329,9 +345,11 @@ def main() -> None:
         fit_letterbox(Image.open(png_paths[i]).convert("RGB"))
         for i in range(args.start_index, args.start_index + num_frames_total)
     ]
-    sensor_tensor = torch.stack(
-        [normalize(im) for im in sensor_pixel_frames], dim=1
-    ).unsqueeze(0).to(device=device, dtype=torch.bfloat16)
+    sensor_tensor = (
+        torch.stack([normalize(im) for im in sensor_pixel_frames], dim=1)
+        .unsqueeze(0)
+        .to(device=device, dtype=torch.bfloat16)
+    )
 
     conditional_dict = pipeline.text_encoder(text_prompts=[args.caption])
 
@@ -346,7 +364,7 @@ def main() -> None:
     # Streaming loop: each iteration ingests the next 12 px frames and predicts.
     last_ingest_start = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * (num_pred_blocks - 1)
     for start_px in range(INITIAL_PX_FRAMES, last_ingest_start, FRAMES_PER_BLOCK):
-        predictor.ingest(sensor_tensor[:, :, start_px:start_px + FRAMES_PER_BLOCK])
+        predictor.ingest(sensor_tensor[:, :, start_px : start_px + FRAMES_PER_BLOCK])
         decoded_blocks.append(predictor.predict_and_decode())
     predictor.finish()
 
@@ -355,19 +373,20 @@ def main() -> None:
     decode_times = predictor.decode_times
     advance_times = predictor.advance_dec_times
     block_times = [
-        predict_times[k] + decode_times[k]
+        predict_times[k]
+        + decode_times[k]
         + (encode_times[k] + advance_times[k] if k < len(encode_times) and k > 0 else 0)
         for k in range(num_pred_blocks)
     ]
     print(
         f"  encode total {sum(encode_times):.2f}s ({len(encode_times)} calls, "
-        f"per-call {sum(encode_times)/len(encode_times):.3f}s)\n"
+        f"per-call {sum(encode_times) / len(encode_times):.3f}s)\n"
         f"  predict total {sum(predict_times):.2f}s ({len(predict_times)} calls, "
-        f"per-call {sum(predict_times)/len(predict_times):.3f}s)\n"
+        f"per-call {sum(predict_times) / len(predict_times):.3f}s)\n"
         f"  decode (pred) total {sum(decode_times):.2f}s "
-        f"per-call {sum(decode_times)/len(decode_times):.3f}s\n"
+        f"per-call {sum(decode_times) / len(decode_times):.3f}s\n"
         f"  decode (sensor advance) total {sum(advance_times):.2f}s "
-        f"per-call {sum(advance_times)/len(advance_times):.3f}s"
+        f"per-call {sum(advance_times) / len(advance_times):.3f}s"
     )
 
     composed: list[np.ndarray] = []
@@ -376,7 +395,7 @@ def main() -> None:
         block_start_global = args.start_index + block_start_local
         block_start_time = block_start_global / SOURCE_FPS
         print(
-            f"  block {k+1}: predicted from t={block_start_time:.2f}s for next "
+            f"  block {k + 1}: predicted from t={block_start_time:.2f}s for next "
             f"{FRAMES_PER_BLOCK} frames | gen {block_times[k]:.2f}s"
         )
 
@@ -399,7 +418,7 @@ def main() -> None:
             )
             draw_label(
                 side_by_side,
-                f"block {k+1}/{num_pred_blocks} frame {i+1}/{FRAMES_PER_BLOCK} | gen {block_times[k]:.2f}s",
+                f"block {k + 1}/{num_pred_blocks} frame {i + 1}/{FRAMES_PER_BLOCK} | gen {block_times[k]:.2f}s",
                 (16, TARGET_H - 16),
             )
             composed.append(side_by_side)
