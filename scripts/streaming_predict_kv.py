@@ -39,9 +39,6 @@ INITIAL_PX_FRAMES = 9               # 1 + 4*(3-1)
 FRAMES_PER_BLOCK = 12               # 4 px per non-first latent × 3
 KV_CACHE_LATENT_LIMIT = 21          # self_forcing_dmd
 
-DELTA_T_TO_GEN_IDX = {0.25: 3, 0.5: 7, 0.75: 11}
-
-
 def fit_letterbox(img: Image.Image, target_w: int = TARGET_W, target_h: int = TARGET_H) -> Image.Image:
     src_w, src_h = img.size
     if (src_w, src_h) == (target_w, target_h):
@@ -283,10 +280,6 @@ def main() -> None:
         "--caption",
         default="First-person dashcam view from a car driving on a CARLA simulated road.",
     )
-    parser.add_argument(
-        "--delta_t", type=float, default=0.5, choices=[0.25, 0.5, 0.75],
-        help="Prediction lookahead in seconds (0.25 / 0.50 / 0.75).",
-    )
     parser.add_argument("--start_index", type=int, default=20)
     parser.add_argument("--num_frames", type=int, default=None,
                         help="Number of sensor frames to consume. "
@@ -296,7 +289,6 @@ def main() -> None:
     args = parser.parse_args()
 
     max_blocks = (KV_CACHE_LATENT_LIMIT - INITIAL_LATENTS) // LATENTS_PER_BLOCK  # 6
-    delta_idx = DELTA_T_TO_GEN_IDX[args.delta_t]
 
     set_seed(args.seed)
     device = torch.device("cuda")
@@ -343,7 +335,7 @@ def main() -> None:
 
     conditional_dict = pipeline.text_encoder(text_prompts=[args.caption])
 
-    print(f"Streaming inference: {num_pred_blocks} blocks (Δt={args.delta_t}s)")
+    print(f"Streaming inference: {num_pred_blocks} blocks")
     predictor = StreamingPredictor(pipeline, conditional_dict, device)
 
     # Seed: encode first 9 frames, inject into KV, prime decoder cache, then make
@@ -397,13 +389,6 @@ def main() -> None:
             sensor_frame = np.array(sensor_pixel_frames[sensor_local])
             pred_arr = pred_block[i].permute(1, 2, 0).cpu().float().numpy()
             pred_frame = (pred_arr * 255.0).clip(0, 255).astype(np.uint8).copy()
-
-            if i == delta_idx:
-                cv2.rectangle(
-                    pred_frame, (0, 0),
-                    (pred_frame.shape[1] - 1, pred_frame.shape[0] - 1),
-                    (255, 255, 0), thickness=6,
-                )
 
             side_by_side = np.concatenate([sensor_frame, pred_frame], axis=1)
             draw_label(side_by_side, f"sensor t={sensor_time:.2f}s", (16, 36))
