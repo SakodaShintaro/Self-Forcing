@@ -514,32 +514,51 @@ class WanVAE_(nn.Module):
         x_recon = self.decode(z)
         return x_recon, mu, log_var
 
-    def encode(self, x, scale):
-        self.clear_cache()
-        # cache
+    def encode(self, x, scale, use_cache=False):
+        # use_cache=False (default): standalone encode, 1+4+4+... chunking, cache cleared.
+        # use_cache=True: streaming. Caller is responsible for clear_cache() before the first
+        #   call; the encoder auto-detects init vs continuation by inspecting the feat_map and
+        #   uses the 1+4*N pattern for the seed call and 4*N pattern for subsequent calls.
+        if not use_cache:
+            self.clear_cache()
         t = x.shape[2]
-        iter_ = 1 + (t - 1) // 4
-        # 对encode输入的x，按时间拆分为1、4、4、4....
-        for i in range(iter_):
-            self._enc_conv_idx = [0]
-            if i == 0:
-                out = self.encoder(
-                    x[:, :, :1, :, :],
+        is_init = (not use_cache) or (self._enc_feat_map[0] is None)
+        if is_init:
+            assert (t - 1) % 4 == 0, f"first encode requires 1+4*N frames, got {t}"
+            iter_ = 1 + (t - 1) // 4
+            # 对encode输入的x，按时间拆分为1、4、4、4....
+            for i in range(iter_):
+                self._enc_conv_idx = [0]
+                if i == 0:
+                    out = self.encoder(
+                        x[:, :, :1, :, :],
+                        feat_cache=self._enc_feat_map,
+                        feat_idx=self._enc_conv_idx)
+                else:
+                    out_ = self.encoder(
+                        x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
+                        feat_cache=self._enc_feat_map,
+                        feat_idx=self._enc_conv_idx)
+                    out = torch.cat([out, out_], 2)
+        else:
+            assert t % 4 == 0, f"streaming continuation requires 4*N frames, got {t}"
+            n_chunks = t // 4
+            chunks = []
+            for i in range(n_chunks):
+                self._enc_conv_idx = [0]
+                chunks.append(self.encoder(
+                    x[:, :, 4 * i:4 * (i + 1), :, :],
                     feat_cache=self._enc_feat_map,
-                    feat_idx=self._enc_conv_idx)
-            else:
-                out_ = self.encoder(
-                    x[:, :, 1 + 4 * (i - 1):1 + 4 * i, :, :],
-                    feat_cache=self._enc_feat_map,
-                    feat_idx=self._enc_conv_idx)
-                out = torch.cat([out, out_], 2)
+                    feat_idx=self._enc_conv_idx))
+            out = torch.cat(chunks, 2)
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(
                 1, self.z_dim, 1, 1, 1)
         else:
             mu = (mu - scale[0]) * scale[1]
-        self.clear_cache()
+        if not use_cache:
+            self.clear_cache()
         return mu
 
     def decode(self, z, scale):

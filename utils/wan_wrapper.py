@@ -77,14 +77,18 @@ class WanVAEWrapper(torch.nn.Module):
             z_dim=16,
         ).eval().requires_grad_(False)
 
-    def encode_to_latent(self, pixel: torch.Tensor) -> torch.Tensor:
+    def encode_to_latent(self, pixel: torch.Tensor, use_cache: bool = False) -> torch.Tensor:
         # pixel: [batch_size, num_channels, num_frames, height, width]
+        # use_cache=True: streaming continuation; expects 4*N frames per call and the
+        # internal feat_cache must have been seeded by a prior use_cache=False call.
+        if use_cache:
+            assert pixel.shape[0] == 1, "Batch size must be 1 when using cache"
         device, dtype = pixel.device, pixel.dtype
         scale = [self.mean.to(device=device, dtype=dtype),
                  1.0 / self.std.to(device=device, dtype=dtype)]
 
         output = [
-            self.model.encode(u.unsqueeze(0), scale).float().squeeze(0)
+            self.model.encode(u.unsqueeze(0), scale, use_cache=use_cache).float().squeeze(0)
             for u in pixel
         ]
         output = torch.stack(output, dim=0)
