@@ -293,8 +293,6 @@ def main() -> None:
                              "Default: use as many as fit in the KV cache (= 81 frames = 6 blocks).")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--use_ema", action="store_true")
-    parser.add_argument("--output_fps", type=int, default=SOURCE_FPS,
-                        help="Side-by-side video fps (12 frames per block; 16 = real-time).")
     args = parser.parse_args()
 
     max_blocks = (KV_CACHE_LATENT_LIMIT - INITIAL_LATENTS) // LATENTS_PER_BLOCK  # 6
@@ -423,12 +421,12 @@ def main() -> None:
 
     out = torch.from_numpy(np.stack(composed, axis=0)).float()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    write_video(str(args.output), out, fps=args.output_fps)
+    write_video(str(args.output), out, fps=SOURCE_FPS)
 
     sensor_dt = FRAMES_PER_BLOCK / SOURCE_FPS  # 0.75s per block
     avg_block = sum(block_times) / len(block_times)
     print(
-        f"\nWrote {args.output} ({len(composed)} frames @ {args.output_fps} fps)\n"
+        f"\nWrote {args.output} ({len(composed)} frames @ {SOURCE_FPS} fps)\n"
         f"Per-block wall {avg_block:.2f}s vs sensor {sensor_dt:.2f}s "
         f"→ {avg_block / sensor_dt:.2f}× real-time ({sensor_dt / avg_block:.2f}× speed)"
     )
