@@ -65,13 +65,6 @@ def draw_label(frame: np.ndarray, text: str, org: tuple[int, int]) -> None:
     cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
 
-def resolve_checkpoint(spec: str) -> str:
-    if spec.startswith("hf:"):
-        _, repo_id, filename = spec.split(":", 2)
-        return hf_hub_download(repo_id, filename)
-    return spec
-
-
 def build_pipeline(args, device: torch.device):
     print(f"Free VRAM {get_cuda_free_memory_gb(gpu)} GB")
     low_memory = get_cuda_free_memory_gb(gpu) < 40
@@ -86,8 +79,9 @@ def build_pipeline(args, device: torch.device):
     else:
         pipeline = CausalDiffusionInferencePipeline(config, device=device)
 
-    checkpoint_path = "hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt"
-    state_dict = torch.load(resolve_checkpoint(checkpoint_path), map_location="cpu")
+    repo_id = "gdhe17/Self-Forcing"
+    filename = "checkpoints/self_forcing_dmd.pt"
+    state_dict = torch.load(hf_hub_download(repo_id, filename), map_location="cpu")
     pipeline.generator.load_state_dict(state_dict["generator_ema" if args.use_ema else "generator"])
     pipeline = pipeline.to(dtype=torch.bfloat16)
     if low_memory:
