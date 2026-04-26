@@ -1,0 +1,62 @@
+[project]
+name = "self-forcing"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+readme = "README.md"
+license = "MIT"
+dependencies = [
+    # PyTorch 2.7系に固定（プリビルドホイールとの互換性のため）
+    "torch>=2.7,<2.8",
+    "torchvision>=0.22,<0.23",
+    # CUDA拡張パッケージ（プリビルドホイール使用）
+    "flash-attn",
+    # Diffusion / model deps
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "huggingface_hub[cli]",
+    "sentencepiece",
+    "tokenizers",
+    # Core utils
+    "omegaconf",
+    "einops",
+    "easydict",
+    "ftfy",
+    "regex",
+    "tqdm",
+    "lmdb",
+    "numpy",
+    "pillow",
+    "imageio[ffmpeg]",
+    "av",
+    "opencv-python",
+    "scipy",
+    # Demo UI
+    "gradio>=4.44.0",
+    # Build helpers
+    "wheel",
+    "packaging",
+    "setuptools<81",
+]
+
+[tool.uv]
+exclude-newer = "40 days"
+exclude-newer-package = { torch = false, torchvision = false }
+index-url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["I"]
+extend-ignore = ["ANN", "D"]
