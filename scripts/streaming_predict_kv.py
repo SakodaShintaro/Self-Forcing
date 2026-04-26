@@ -100,123 +100,146 @@ def build_pipeline(args, device: torch.device):
     return pipeline, low_memory
 
 
-def streaming_kv_inference(pipeline, sensor_tensor: torch.Tensor,
-                           conditional_dict, num_pred_blocks: int, device: torch.device):
-    """Streaming inference with per-block sensor encoding and KV cache injection.
+class StreamingPredictor:
+    """Stateful streaming predictor.
 
-    sensor_tensor: (1, C, T, H, W). For each block k = 0..num_pred_blocks-1:
-        1. Generate the block's prediction (KV cache holds prior sensor latents).
-        2. If k < last: take the next 12 px frames, encode them with the VAE in
-           streaming mode (use_cache=True), and write them into the KV cache slot
-           that the prediction would otherwise have occupied.
-
-    Returns (predictions, block_times, encode_times, all_sensor_latents).
+    Usage:
+        sp = StreamingPredictor(pipeline, conditional_dict, device)
+        sp.initialize(initial_9_frames)        # seed KV cache with 3 sensor latents
+        for new_12_frames in sensor_stream:
+            prediction = sp.step(new_12_frames)  # inject sensor, generate one prediction
     """
-    batch_size = 1
-    dtype = torch.bfloat16
 
-    pipeline._initialize_kv_cache(batch_size=batch_size, dtype=dtype, device=device)
-    pipeline._initialize_crossattn_cache(batch_size=batch_size, dtype=dtype, device=device)
-    pipeline.vae.model.clear_cache()  # fresh streaming VAE state
+    def __init__(self, pipeline, conditional_dict, device: torch.device):
+        self.pipeline = pipeline
+        self.conditional_dict = conditional_dict
+        self.device = device
+        self.dtype = torch.bfloat16
+        self.batch_size = 1
+        self.context_noise = int(getattr(pipeline.args, "context_noise", 0))
 
-    encode_times: list[float] = []
-    accumulated_latents: list[torch.Tensor] = []
+        self.current_start_frame = 0
+        self.accumulated_latents: list[torch.Tensor] = []
+        self.encode_times: list[float] = []
+        self.step_times: list[float] = []
 
-    # === Initial 9 frames → 3 latents (seed the VAE feat_cache) ===
-    initial_pixels = sensor_tensor[:, :, :INITIAL_PX_FRAMES].to(dtype=dtype)
-    torch.cuda.synchronize()
-    t_e = time.perf_counter()
-    initial_latents = pipeline.vae.encode_to_latent(initial_pixels, use_cache=True).to(dtype=dtype)
-    torch.cuda.synchronize()
-    encode_times.append(time.perf_counter() - t_e)
-    accumulated_latents.append(initial_latents)
+    def initialize(self, initial_pixels: torch.Tensor) -> None:
+        """Seed VAE encoder + KV cache from the first 9 px frames."""
+        assert initial_pixels.shape[2] == INITIAL_PX_FRAMES, (
+            f"initial_pixels expects {INITIAL_PX_FRAMES} frames, got {initial_pixels.shape[2]}"
+        )
+        self.pipeline._initialize_kv_cache(batch_size=self.batch_size, dtype=self.dtype, device=self.device)
+        self.pipeline._initialize_crossattn_cache(batch_size=self.batch_size, dtype=self.dtype, device=self.device)
+        self.pipeline.vae.model.clear_cache()
+        self.current_start_frame = 0
+        self.accumulated_latents = []
+        self.encode_times = []
+        self.step_times = []
 
-    # Cache initial sensor latents into KV cache slot 0..2
-    current_start_frame = 0
-    init_timestep = torch.zeros([batch_size, 1], dtype=torch.int64, device=device)
-    pipeline.generator(
-        noisy_image_or_video=initial_latents,
-        conditional_dict=conditional_dict,
-        timestep=init_timestep,
-        kv_cache=pipeline.kv_cache1,
-        crossattn_cache=pipeline.crossattn_cache,
-        current_start=current_start_frame * pipeline.frame_seq_length,
-    )
-    current_start_frame += INITIAL_LATENTS
+        latents = self._encode(initial_pixels)
+        self.accumulated_latents.append(latents)
+        self._inject(latents)
+        self.current_start_frame += INITIAL_LATENTS
 
-    predictions: list[torch.Tensor] = []
-    block_times: list[float] = []
-    context_noise = int(getattr(pipeline.args, "context_noise", 0))
+    def step(self, new_pixels: torch.Tensor) -> torch.Tensor:
+        """Streaming tick: encode 12 incoming frames, inject into KV, predict 1 block.
 
-    for k in range(num_pred_blocks):
+        new_pixels: (1, C, 12, H, W). Returns the predicted 3 latents.
+        """
+        assert new_pixels.shape[2] == FRAMES_PER_BLOCK, (
+            f"step expects {FRAMES_PER_BLOCK} frames per call, got {new_pixels.shape[2]}"
+        )
         torch.cuda.synchronize()
-        t_start = time.perf_counter()
+        t0 = time.perf_counter()
 
-        # --- Denoising loop on fresh noise (3 latents) ---
+        # 1. Sensor arrives: encode + inject into KV at the slot of the *next* prediction
+        new_latents = self._encode(new_pixels)
+        self.accumulated_latents.append(new_latents)
+        self._inject(new_latents)
+        self.current_start_frame += LATENTS_PER_BLOCK
+
+        # 2. Predict the next 0.75s
+        prediction = self._predict()
+
+        torch.cuda.synchronize()
+        self.step_times.append(time.perf_counter() - t0)
+        return prediction
+
+    def step_initial(self) -> torch.Tensor:
+        """Variant of step() that produces the very first prediction (no sensor injection
+        beyond the initial seed). Used because at k=0 we predict before any new sensor has
+        arrived past the seed window."""
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        prediction = self._predict()
+        torch.cuda.synchronize()
+        self.step_times.append(time.perf_counter() - t0)
+        return prediction
+
+    @property
+    def all_sensor_latents(self) -> torch.Tensor:
+        return torch.cat(self.accumulated_latents, dim=1)
+
+    def finish(self) -> None:
+        self.pipeline.vae.model.clear_cache()
+
+    # --- internal helpers -------------------------------------------------
+
+    def _encode(self, pixels: torch.Tensor) -> torch.Tensor:
+        pixels = pixels.to(dtype=self.dtype)
+        torch.cuda.synchronize()
+        t = time.perf_counter()
+        latents = self.pipeline.vae.encode_to_latent(pixels, use_cache=True).to(dtype=self.dtype)
+        torch.cuda.synchronize()
+        self.encode_times.append(time.perf_counter() - t)
+        return latents
+
+    def _inject(self, latents: torch.Tensor) -> None:
+        """Write sensor latents into KV cache at current_start_frame slot, timestep=0."""
+        timestep = torch.full(
+            [self.batch_size, 1], self.context_noise, dtype=torch.int64, device=self.device,
+        )
+        self.pipeline.generator(
+            noisy_image_or_video=latents,
+            conditional_dict=self.conditional_dict,
+            timestep=timestep,
+            kv_cache=self.pipeline.kv_cache1,
+            crossattn_cache=self.pipeline.crossattn_cache,
+            current_start=self.current_start_frame * self.pipeline.frame_seq_length,
+        )
+
+    def _predict(self) -> torch.Tensor:
+        """Run denoising loop at current_start_frame slot. Returns 3 prediction latents."""
         sampled_noise = torch.randn(
-            [batch_size, LATENTS_PER_BLOCK, 16, 60, 104],
-            device=device, dtype=dtype,
+            [self.batch_size, LATENTS_PER_BLOCK, 16, 60, 104],
+            device=self.device, dtype=self.dtype,
         )
         noisy_input = sampled_noise
-
-        for index, current_timestep in enumerate(pipeline.denoising_step_list):
+        denoising_steps = self.pipeline.denoising_step_list
+        for index, current_timestep in enumerate(denoising_steps):
             timestep = torch.full(
-                [batch_size, LATENTS_PER_BLOCK],
+                [self.batch_size, LATENTS_PER_BLOCK],
                 int(current_timestep.item()),
-                device=device, dtype=torch.int64,
+                device=self.device, dtype=torch.int64,
             )
-            _, denoised_pred = pipeline.generator(
+            _, denoised_pred = self.pipeline.generator(
                 noisy_image_or_video=noisy_input,
-                conditional_dict=conditional_dict,
+                conditional_dict=self.conditional_dict,
                 timestep=timestep,
-                kv_cache=pipeline.kv_cache1,
-                crossattn_cache=pipeline.crossattn_cache,
-                current_start=current_start_frame * pipeline.frame_seq_length,
+                kv_cache=self.pipeline.kv_cache1,
+                crossattn_cache=self.pipeline.crossattn_cache,
+                current_start=self.current_start_frame * self.pipeline.frame_seq_length,
             )
-            if index < len(pipeline.denoising_step_list) - 1:
-                next_timestep = pipeline.denoising_step_list[index + 1]
-                noisy_input = pipeline.scheduler.add_noise(
+            if index < len(denoising_steps) - 1:
+                next_t = denoising_steps[index + 1]
+                noisy_input = self.pipeline.scheduler.add_noise(
                     denoised_pred.flatten(0, 1),
                     torch.randn_like(denoised_pred.flatten(0, 1)),
-                    next_timestep * torch.ones(
-                        [batch_size * LATENTS_PER_BLOCK], device=device, dtype=torch.long,
+                    next_t * torch.ones(
+                        [self.batch_size * LATENTS_PER_BLOCK], device=self.device, dtype=torch.long,
                     ),
                 ).unflatten(0, denoised_pred.shape[:2])
-
-        predictions.append(denoised_pred.detach().clone())
-
-        # --- Streaming sensor arrival: encode next 12 frames + inject ---
-        if k < num_pred_blocks - 1:
-            start_px = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * k
-            end_px = start_px + FRAMES_PER_BLOCK
-            next_pixels = sensor_tensor[:, :, start_px:end_px].to(dtype=dtype)
-
-            torch.cuda.synchronize()
-            t_e = time.perf_counter()
-            next_latents = pipeline.vae.encode_to_latent(next_pixels, use_cache=True).to(dtype=dtype)
-            torch.cuda.synchronize()
-            encode_times.append(time.perf_counter() - t_e)
-            accumulated_latents.append(next_latents)
-
-            replace_timestep = torch.full(
-                [batch_size, 1], context_noise, dtype=torch.int64, device=device,
-            )
-            pipeline.generator(
-                noisy_image_or_video=next_latents,
-                conditional_dict=conditional_dict,
-                timestep=replace_timestep,
-                kv_cache=pipeline.kv_cache1,
-                crossattn_cache=pipeline.crossattn_cache,
-                current_start=current_start_frame * pipeline.frame_seq_length,
-            )
-            current_start_frame += LATENTS_PER_BLOCK
-
-        torch.cuda.synchronize()
-        block_times.append(time.perf_counter() - t_start)
-
-    pipeline.vae.model.clear_cache()  # release encoder feat_cache after streaming
-    all_sensor_latents = torch.cat(accumulated_latents, dim=1)
-    return predictions, block_times, encode_times, all_sensor_latents
+        return denoised_pred.detach().clone()
 
 
 def decode_prediction_block(pipeline, all_sensor_latents: torch.Tensor,
@@ -253,8 +276,9 @@ def main() -> None:
         help="Prediction lookahead in seconds (0.25 / 0.50 / 0.75).",
     )
     parser.add_argument("--start_index", type=int, default=20)
-    parser.add_argument("--num_pred_blocks", type=int, default=6,
-                        help="Number of prediction steps. Max 6 with self_forcing_dmd.")
+    parser.add_argument("--num_frames", type=int, default=None,
+                        help="Number of sensor frames to consume. "
+                             "Default: use as many as fit in the KV cache (= 81 frames = 6 blocks).")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--use_ema", action="store_true")
     parser.add_argument("--output_fps", type=int, default=SOURCE_FPS,
@@ -262,11 +286,7 @@ def main() -> None:
     args = parser.parse_args()
 
     max_blocks = (KV_CACHE_LATENT_LIMIT - INITIAL_LATENTS) // LATENTS_PER_BLOCK  # 6
-    if args.num_pred_blocks > max_blocks:
-        raise ValueError(f"num_pred_blocks > {max_blocks} exceeds the 21-latent KV cache budget")
-
     delta_idx = DELTA_T_TO_GEN_IDX[args.delta_t]
-    delta_t_frames = int(round(args.delta_t * SOURCE_FPS))
 
     set_seed(args.seed)
     device = torch.device("cuda")
@@ -278,14 +298,31 @@ def main() -> None:
     ])
 
     png_paths = sorted(args.src.glob("*.png"))
-    num_frames_total = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * args.num_pred_blocks
-    if args.start_index + num_frames_total > len(png_paths):
+    available = len(png_paths) - args.start_index
+    cap_by_kv = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * max_blocks  # 81
+    if args.num_frames is None:
+        num_frames_total = min(available, cap_by_kv)
+    else:
+        if args.num_frames > available:
+            raise ValueError(
+                f"--num_frames={args.num_frames} > available {available} "
+                f"(from start_index {args.start_index} in {args.src})"
+            )
+        num_frames_total = min(args.num_frames, cap_by_kv)
+    if num_frames_total < INITIAL_PX_FRAMES + FRAMES_PER_BLOCK:
         raise ValueError(
-            f"Not enough sensor frames at {args.src}: need {num_frames_total} from index "
-            f"{args.start_index}, but only {len(png_paths)} present."
+            f"need at least {INITIAL_PX_FRAMES + FRAMES_PER_BLOCK} frames "
+            f"(= seed 9 + 1 block 12), got {num_frames_total}"
         )
 
-    print(f"Loading {num_frames_total} sensor frames from {args.src.name}...")
+    num_pred_blocks = (num_frames_total - INITIAL_PX_FRAMES) // FRAMES_PER_BLOCK
+    # Trim to an exact integer number of blocks
+    num_frames_total = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * num_pred_blocks
+
+    print(
+        f"Loading {num_frames_total} sensor frames from {args.src.name} "
+        f"→ {num_pred_blocks} prediction blocks"
+    )
     sensor_pixel_frames = [
         fit_letterbox(Image.open(png_paths[i]).convert("RGB"))
         for i in range(args.start_index, args.start_index + num_frames_total)
@@ -296,10 +333,25 @@ def main() -> None:
 
     conditional_dict = pipeline.text_encoder(text_prompts=[args.caption])
 
-    print(f"Streaming inference: {args.num_pred_blocks} blocks (Δt={args.delta_t}s)")
-    predictions, block_times, encode_times, all_sensor_latents = streaming_kv_inference(
-        pipeline, sensor_tensor, conditional_dict, args.num_pred_blocks, device,
-    )
+    print(f"Streaming inference: {num_pred_blocks} blocks (Δt={args.delta_t}s)")
+    predictor = StreamingPredictor(pipeline, conditional_dict, device)
+
+    # Seed: encode first 9 frames and inject into KV cache, then make the first
+    # prediction directly on the seed (no new sensor has arrived yet).
+    predictor.initialize(sensor_tensor[:, :, :INITIAL_PX_FRAMES])
+    predictions: list[torch.Tensor] = [predictor.step_initial()]
+
+    # Streaming loop: each iteration ingests the next 12 px frames and predicts.
+    last_ingest_start = INITIAL_PX_FRAMES + FRAMES_PER_BLOCK * (num_pred_blocks - 1)
+    for start_px in range(INITIAL_PX_FRAMES, last_ingest_start, FRAMES_PER_BLOCK):
+        new_pixels = sensor_tensor[:, :, start_px:start_px + FRAMES_PER_BLOCK]
+        predictions.append(predictor.step(new_pixels))
+    predictor.finish()
+
+    block_times = predictor.step_times
+    encode_times = predictor.encode_times
+    all_sensor_latents = predictor.all_sensor_latents
+
     avg_block = sum(block_times) / len(block_times)
     avg_enc = sum(encode_times) / len(encode_times)
     print(
@@ -352,7 +404,7 @@ def main() -> None:
             )
             draw_label(
                 side_by_side,
-                f"block {k+1}/{args.num_pred_blocks} frame {i+1}/{FRAMES_PER_BLOCK} | gen {block_times[k]:.2f}s",
+                f"block {k+1}/{num_pred_blocks} frame {i+1}/{FRAMES_PER_BLOCK} | gen {block_times[k]:.2f}s",
                 (16, TARGET_H - 16),
             )
             composed.append(side_by_side)
