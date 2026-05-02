@@ -18,6 +18,7 @@ dependencies = [
     "peft",
     "sentencepiece",
     "tokenizers",
+    "wandb",
     # Core utils
     "omegaconf",
     "einops",
