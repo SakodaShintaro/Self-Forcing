@@ -1,0 +1,94 @@
+# Fine-tune Self-Forcing on bench2drive latents.
+# Pre-requisites (anchored at b2d_root):
+#   1. scripts/b2d_split.py --src <b2d_root>          -> <b2d_root>/splits.json
+#   2. scripts/b2d_encode_latents.py --src <b2d_root> -> <b2d_root>/latents/{train,valid}/<episode>.pt
+# Launch (single visible GPU; FSDP degrades to a no-op shard):
+#   torchrun --nnodes=1 --nproc_per_node=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29500 \
+#       train.py --config_path configs/b2d_finetune.yaml --logdir logs/b2d_finetune --disable-wandb
+
+# --- starting checkpoint ---
+generator_ckpt: hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt
+generator_ckpt_key: generator_ema   # use the EMA weights from the dmd checkpoint
+
+# --- LoRA fine-tuning ---
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules:
+    - self_attn.q
+    - self_attn.k
+    - self_attn.v
+    - self_attn.o
+    - cross_attn.q
+    - cross_attn.k
+    - cross_attn.v
+    - cross_attn.o
+
+# --- trainer / loss ---
+trainer: diffusion
+distribution_loss: causal_diffusion   # not used by trainer/diffusion.py, kept for symmetry
+denoising_loss_type: flow
+mixed_precision: true
+warp_denoising_step: false
+ts_schedule: false
+num_train_timestep: 1000
+timestep_shift: 5.0
+guidance_scale: 0.0   # we are not training a CFG distillation; loss does not use it
+teacher_forcing: false
+noise_augmentation_max_timestep: 0
+
+# --- model shape ---
+image_or_video_shape:
+- 1
+- 21
+- 16
+- 60
+- 104
+num_frame_per_block: 3
+load_raw_video: false
+gradient_checkpointing: true
+i2v: false
+causal: true
+independent_first_frame: false
+
+model_kwargs:
+  timestep_shift: 5.0
+
+# --- dataset ---
+dataset_type: b2d_latent
+data_path: ""   # unused for b2d_latent but kept for legacy code paths
+b2d_root: /media/sakoda/samsung_4t/bench2drive   # contains splits.json and latents/{train,valid}/
+b2d_split: train
+b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
+negative_prompt: ""
+
+# --- FSDP / sharding ---
+generator_fsdp_wrap_strategy: size
+text_encoder_fsdp_wrap_strategy: size
+text_encoder_cpu_offload: true
+sharding_strategy: hybrid_full
+
+# --- optimizer (LoRA-friendly LR; bump higher than full fine-tune since adapter init is identity) ---
+seed: 0
+lr: 1.0e-4
+beta1: 0.9
+beta2: 0.999
+weight_decay: 0.01
+batch_size: 1
+total_batch_size: 1   # batch_size * world_size; bump if you have more GPUs / want grad accum
+ema_weight: 0.99
+ema_start_step: 200
+
+# --- logging / saving ---
+log_iters: 200
+gc_interval: 100
+no_save: false
+no_visualize: true   # disable rollout visualization on first run
+disable_wandb: true
+wandb_host: ""
+wandb_key: ""
+wandb_entity: ""
+wandb_project: ""
+wandb_save_dir: ""

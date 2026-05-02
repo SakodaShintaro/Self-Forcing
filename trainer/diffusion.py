@@ -1,17 +1,17 @@
 import gc
 import logging
+import os
+import time
+
+import torch
+import torch.distributed as dist
+import wandb
+from omegaconf import OmegaConf
 
 from model import CausalDiffusion
 from utils.dataset import ShardingLMDBDataset, cycle
-from utils.misc import set_seed
-import torch.distributed as dist
-from omegaconf import OmegaConf
-import torch
-import wandb
-import time
-import os
-
-from utils.distributed import EMA_FSDP, barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job
+from utils.distributed import EMA_FSDP, barrier, fsdp_state_dict, fsdp_wrap, launch_distributed_job
+from utils.misc import resolve_checkpoint_path, set_seed
 
 
 class Trainer:
@@ -41,20 +41,70 @@ class Trainer:
         set_seed(config.seed + global_rank)
 
         if self.is_main_process and not self.disable_wandb:
-            wandb.login(host=config.wandb_host, key=config.wandb_key)
+            # Only call wandb.login() when an explicit key is provided; otherwise
+            # let wandb fall back to its cached credentials (e.g. ~/.netrc).
+            if config.wandb_key:
+                wandb.login(host=config.wandb_host or None, key=config.wandb_key)
             wandb.init(
                 config=OmegaConf.to_container(config, resolve=True),
                 name=config.config_name,
                 mode="online",
-                entity=config.wandb_entity,
-                project=config.wandb_project,
-                dir=config.wandb_save_dir
+                entity=config.wandb_entity or None,
+                project=config.wandb_project or "self-forcing",
+                dir=config.wandb_save_dir or None,
             )
 
         self.output_path = config.logdir
 
-        # Step 2: Initialize the model and optimizer
+        # Step 2: Initialize the model
         self.model = CausalDiffusion(config, device=self.device)
+
+        # Step 2.1: Load pretrained generator weights BEFORE LoRA / FSDP wrap.
+        # (LoRA wrap renames base linear keys, so the upstream checkpoint must be
+        # applied to the bare CausalWanModel first.)
+        if getattr(config, "generator_ckpt", False):
+            ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
+            print(f"Loading pretrained generator from {ckpt_path}")
+            state_dict = torch.load(ckpt_path, map_location="cpu")
+            ckpt_key = getattr(config, "generator_ckpt_key", None)
+            if ckpt_key and ckpt_key in state_dict:
+                state_dict = state_dict[ckpt_key]
+            elif "generator" in state_dict:
+                state_dict = state_dict["generator"]
+            elif "generator_ema" in state_dict:
+                state_dict = state_dict["generator_ema"]
+            elif "model" in state_dict:
+                state_dict = state_dict["model"]
+            cleaned = {
+                k.replace("_fsdp_wrapped_module.", "")
+                 .replace("_checkpoint_wrapped_module.", "")
+                 .replace("_orig_mod.", ""): v
+                for k, v in state_dict.items()
+            }
+            self.model.generator.load_state_dict(cleaned, strict=True)
+
+        # Step 2.2: Optionally attach LoRA adapters (after base load, before FSDP).
+        lora_cfg = getattr(config, "lora", None)
+        self.use_lora = bool(lora_cfg and lora_cfg.get("enabled", False))
+        if self.use_lora:
+            from peft import LoraConfig, get_peft_model
+            self.model.generator.model.requires_grad_(False)
+            peft_cfg = LoraConfig(
+                r=int(lora_cfg.get("rank", 16)),
+                lora_alpha=int(lora_cfg.get("alpha", 32)),
+                lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+                target_modules=list(lora_cfg.get(
+                    "target_modules",
+                    ["self_attn.q", "self_attn.k", "self_attn.v", "self_attn.o",
+                     "cross_attn.q", "cross_attn.k", "cross_attn.v", "cross_attn.o"],
+                )),
+                bias="none",
+            )
+            self.model.generator.model = get_peft_model(self.model.generator.model, peft_cfg)
+            if dist.get_rank() == 0:
+                self.model.generator.model.print_trainable_parameters()
+
+        # Step 2.3: FSDP wrap (LoRA layers, if any, get wrapped together with the base)
         self.model.generator = fsdp_wrap(
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
@@ -66,7 +116,8 @@ class Trainer:
             self.model.text_encoder,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.text_encoder_fsdp_wrap_strategy
+            wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
+            cpu_offload=getattr(config, "text_encoder_cpu_offload", False),
         )
 
         if not config.no_visualize or config.load_raw_video:
@@ -82,7 +133,17 @@ class Trainer:
         )
 
         # Step 3: Initialize the dataloader
-        dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
+        dataset_type = getattr(config, "dataset_type", "lmdb")
+        if dataset_type == "b2d_latent":
+            from utils.b2d_dataset import Bench2DriveLatentDataset
+            dataset = Bench2DriveLatentDataset(
+                b2d_root=config.b2d_root,
+                split=config.b2d_split,
+                num_frames=config.image_or_video_shape[1],
+                fixed_caption=config.b2d_caption,
+            )
+        else:
+            dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset, shuffle=True, drop_last=True)
         dataloader = torch.utils.data.DataLoader(
@@ -114,21 +175,6 @@ class Trainer:
         if (ema_weight is not None) and (ema_weight > 0.0):
             print(f"Setting up EMA with weight {ema_weight}")
             self.generator_ema = EMA_FSDP(self.model.generator, decay=ema_weight)
-
-        ##############################################################################################################
-        # 7. (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
-        if getattr(config, "generator_ckpt", False):
-            print(f"Loading pretrained generator from {config.generator_ckpt}")
-            state_dict = torch.load(config.generator_ckpt, map_location="cpu")
-            if "generator" in state_dict:
-                state_dict = state_dict["generator"]
-            elif "model" in state_dict:
-                state_dict = state_dict["model"]
-            self.model.generator.load_state_dict(
-                state_dict, strict=True
-            )
-
-        ##############################################################################################################
 
         # Let's delete EMA params for early steps to save some computes at training and inference
         if self.step < config.ema_start_step:
@@ -223,6 +269,14 @@ class Trainer:
         if self.is_main_process:
             if not self.disable_wandb:
                 wandb.log(wandb_loss_dict, step=self.step)
+            now = time.time()
+            iter_time = (now - self.previous_time) if self.previous_time is not None else 0.0
+            print(
+                f"step={self.step} loss={wandb_loss_dict['generator_loss']:.4f} "
+                f"grad_norm={wandb_loss_dict['generator_grad_norm']:.3f} "
+                f"iter_time={iter_time:.2f}s",
+                flush=True,
+            )
 
         if self.step % self.config.gc_interval == 0:
             if dist.get_rank() == 0:
@@ -246,7 +300,8 @@ class Trainer:
         return current_video
 
     def train(self):
-        while True:
+        max_steps = getattr(self.config, "max_steps", None)
+        while max_steps is None or self.step < max_steps:
             batch = next(self.dataloader)
             self.train_one_step(batch)
             if (not self.config.no_save) and self.step % self.config.log_iters == 0:
@@ -263,3 +318,7 @@ class Trainer:
                     if not self.disable_wandb:
                         wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
                     self.previous_time = current_time
+        # Always save the final checkpoint at exit if we ran to a hard step cap.
+        if max_steps is not None and not self.config.no_save:
+            torch.cuda.empty_cache()
+            self.save()
