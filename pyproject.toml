@@ -15,6 +15,7 @@ dependencies = [
     "transformers",
     "accelerate",
     "huggingface_hub[cli]",
+    "peft",
     "sentencepiece",
     "tokenizers",
     # Core utils
