@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from einops import rearrange
-from huggingface_hub import hf_hub_download
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
@@ -21,7 +20,7 @@ from pipeline import (
     CausalInferencePipeline,
 )
 from utils.dataset import TextDataset, TextImagePairDataset
-from utils.misc import set_seed
+from utils.misc import resolve_checkpoint_path, set_seed
 
 
 def annotate_video(video_thwc: torch.Tensor, num_context_pixel_frames: int,
@@ -44,14 +43,6 @@ def annotate_video(video_thwc: torch.Tensor, num_context_pixel_frames: int,
                     0.6, (255, 255, 255), 2, cv2.LINE_AA)
         arr[t] = frame
     return torch.from_numpy(arr).float()
-
-
-def resolve_checkpoint_path(spec: str) -> str:
-    """Resolve --checkpoint_path. Supports a local path or `hf:repo_id:filename`."""
-    if spec.startswith("hf:"):
-        _, repo_id, filename = spec.split(":", 2)
-        return hf_hub_download(repo_id, filename)
-    return spec
 
 
 parser = argparse.ArgumentParser()
