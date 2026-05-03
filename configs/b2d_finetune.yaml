@@ -3,8 +3,10 @@
 #   1. scripts/b2d_split.py --src <b2d_root>          -> <b2d_root>/splits.json
 #   2. scripts/b2d_encode_latents.py --src <b2d_root> -> <b2d_root>/latents/{train,valid}/<episode>.pt
 # Launch (single visible GPU; FSDP degrades to a no-op shard):
-#   torchrun --nnodes=1 --nproc_per_node=1 --rdzv_backend=c10d --rdzv_endpoint=localhost:29500 \
-#       train.py --config_path configs/b2d_finetune.yaml --logdir logs/b2d_finetune --disable-wandb
+#   uv run python train.py \
+#       --config_path configs/b2d_finetune.yaml \
+#       --root_dir /path/to/results \
+#       --b2d_root <b2d_root>
 
 # --- starting checkpoint ---
 generator_ckpt: hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt
