@@ -31,8 +31,6 @@ def main():
                              "checkpoints, wandb files, and a tee'd train.log.")
     parser.add_argument("--logdir", type=str, default="",
                         help="Explicit log/checkpoint dir (advanced; use --root-dir instead).")
-    parser.add_argument("--wandb-save-dir", type=str, default="",
-                        help="Explicit wandb save dir (advanced; use --root-dir instead).")
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--b2d_root", type=str, default=None,
                         help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
@@ -41,14 +39,13 @@ def main():
     args = parser.parse_args()
 
     if args.root_dir is not None:
-        if args.logdir or args.wandb_save_dir:
-            parser.error("--root-dir cannot be combined with --logdir / --wandb-save-dir.")
+        if args.logdir:
+            parser.error("--root-dir cannot be combined with --logdir.")
         stamp = time.strftime("%Y%m%d_%H%M%S")
         config_tag = os.path.basename(args.config_path).split(".")[0]
         run_dir = os.path.join(args.root_dir, f"{stamp}_{config_tag}")
         os.makedirs(run_dir, exist_ok=True)
         args.logdir = run_dir
-        args.wandb_save_dir = run_dir
         print(f"run dir: {run_dir}", flush=True)
 
     _set_distributed_defaults()
@@ -70,7 +67,7 @@ def main():
     config_name = os.path.basename(args.config_path).split(".")[0]
     config.config_name = config_name
     config.logdir = args.logdir
-    config.wandb_save_dir = args.wandb_save_dir
+    config.wandb_save_dir = args.logdir
     config.disable_wandb = args.disable_wandb
 
     if config.trainer == "diffusion":
