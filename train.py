@@ -26,12 +26,12 @@ def main():
     parser.add_argument("--config_path", type=str, required=True)
     parser.add_argument("--no_save", action="store_true")
     parser.add_argument("--no_visualize", action="store_true")
-    parser.add_argument("--root-dir", type=str, default=None,
+    parser.add_argument("--root_dir", type=str, default=None,
                         help="If set, create {root_dir}/{stamp}_{config_name}/ and use it for "
                              "checkpoints, wandb files, and a tee'd train.log.")
     parser.add_argument("--logdir", type=str, default="",
                         help="Explicit log/checkpoint dir (advanced; use --root-dir instead).")
-    parser.add_argument("--disable-wandb", action="store_true")
+    parser.add_argument("--disable_wandb", action="store_true")
     parser.add_argument("--b2d_root", type=str, default=None,
                         help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
                              "Required when dataset_type=b2d_latent; overrides config.b2d_root if both are set.")
