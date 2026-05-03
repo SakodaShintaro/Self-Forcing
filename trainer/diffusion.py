@@ -188,15 +188,9 @@ class Trainer:
         generator_state_dict = fsdp_state_dict(
             self.model.generator)
 
-        if self.config.ema_start_step < self.step:
-            state_dict = {
-                "generator": generator_state_dict,
-                "generator_ema": self.generator_ema.state_dict(),
-            }
-        else:
-            state_dict = {
-                "generator": generator_state_dict,
-            }
+        state_dict = {"generator": generator_state_dict}
+        if self.generator_ema is not None:
+            state_dict["generator_ema"] = self.generator_ema.state_dict()
 
         if self.is_main_process:
             os.makedirs(os.path.join(self.output_path,
@@ -283,8 +277,18 @@ class Trainer:
                 logging.info("DistGarbageCollector: Running GC.")
             gc.collect()
 
-        # Step 5. Create EMA params
-        # TODO: Implement EMA
+        # Step 5: Lazily build the EMA shadow at ema_start_step, then update each iter.
+        ema_weight = self.config.ema_weight
+        if ema_weight and ema_weight > 0.0 and self.step >= self.config.ema_start_step:
+            if self.generator_ema is None:
+                if self.is_main_process:
+                    print(
+                        f"Setting up EMA with weight {ema_weight} at step {self.step}",
+                        flush=True,
+                    )
+                self.generator_ema = EMA_FSDP(self.model.generator, decay=ema_weight)
+            else:
+                self.generator_ema.update(self.model.generator)
 
     def generate_video(self, pipeline, prompts, image=None):
         batch_size = len(prompts)
