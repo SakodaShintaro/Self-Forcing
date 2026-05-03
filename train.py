@@ -14,6 +14,9 @@ def main():
     parser.add_argument("--logdir", type=str, default="", help="Path to the directory to save logs")
     parser.add_argument("--wandb-save-dir", type=str, default="", help="Path to the directory to save wandb logs")
     parser.add_argument("--disable-wandb", action="store_true")
+    parser.add_argument("--b2d_root", type=str, default=None,
+                        help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
+                             "Required when dataset_type=b2d_latent; overrides config.b2d_root if both are set.")
 
     args = parser.parse_args()
 
@@ -22,6 +25,13 @@ def main():
     config = OmegaConf.merge(default_config, config)
     config.no_save = args.no_save
     config.no_visualize = args.no_visualize
+
+    if args.b2d_root is not None:
+        config.b2d_root = args.b2d_root
+    if getattr(config, "dataset_type", None) == "b2d_latent" and not getattr(config, "b2d_root", None):
+        parser.error(
+            "dataset_type=b2d_latent requires --b2d_root (or config.b2d_root) to be set."
+        )
 
     # get the filename of config_path
     config_name = os.path.basename(args.config_path).split(".")[0]

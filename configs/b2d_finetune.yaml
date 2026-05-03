@@ -59,7 +59,6 @@ model_kwargs:
 # --- dataset ---
 dataset_type: b2d_latent
 data_path: ""   # unused for b2d_latent but kept for legacy code paths
-b2d_root: /media/sakoda/samsung_4t/bench2drive   # contains splits.json and latents/{train,valid}/
 b2d_split: train
 b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
 negative_prompt: ""
