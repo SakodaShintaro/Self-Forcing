@@ -29,6 +29,7 @@ lora:
     - cross_attn.o
 
 # --- trainer / loss ---
+max_steps: 1000
 trainer: diffusion
 distribution_loss: causal_diffusion   # not used by trainer/diffusion.py, kept for symmetry
 denoising_loss_type: flow
