@@ -32,9 +32,6 @@ lora:
 max_steps: 10
 mixed_precision: true
 warp_denoising_step: false
-num_train_timestep: 1000
-timestep_shift: 5.0
-guidance_scale: 0.0   # we are not training a CFG distillation; loss does not use it
 context_noise: 0   # noise level for KV-cache context refresh in CausalInferencePipeline
 
 # --- model shape ---
@@ -54,7 +51,6 @@ model_kwargs:
 # b2d_root is set per-machine via `--b2d_root` on the train.py CLI (not stored here).
 b2d_split: train
 b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
-negative_prompt: ""
 
 # --- FSDP / sharding ---
 generator_fsdp_wrap_strategy: size
@@ -79,7 +75,6 @@ gc_interval: 100
 valid_iters: 100        # 0 disables; otherwise run validate() every N train steps
 valid_batches: 16       # number of valid mini-batches averaged per validation pass
 no_save: false
-no_visualize: true   # disable rollout visualization on first run
 disable_wandb: true
 wandb_host: ""
 wandb_key: ""

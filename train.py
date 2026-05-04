@@ -181,24 +181,14 @@ class Trainer:
                     f"(valid_batches={self.valid_batches} every {self.valid_iters} steps)"
                 )
 
-        ##############################################################################################################
-        # 6. Set up EMA parameter containers
+        # 6. Set up trainable-param map; EMA shadow is built lazily once
+        # `step` reaches `ema_start_step` (see train_one_step).
         self.name_to_trainable_params = {}
         for n, p in self.model.generator.named_parameters():
             if not p.requires_grad:
                 continue
             self.name_to_trainable_params[strip_wrap_prefixes(n)] = p
-        ema_weight = config.ema_weight
         self.generator_ema = None
-        if (ema_weight is not None) and (ema_weight > 0.0):
-            print(f"Setting up EMA with weight {ema_weight}")
-            self.generator_ema = EMA_FSDP(
-                self.model.generator, decay=ema_weight, trainable_only=True
-            )
-
-        # Let's delete EMA params for early steps to save some computes at training and inference
-        if self.step < config.ema_start_step:
-            self.generator_ema = None
 
         self.max_grad_norm = 10.0
         self.previous_time = None
@@ -409,7 +399,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, required=True)
     parser.add_argument("--no_save", action="store_true")
-    parser.add_argument("--no_visualize", action="store_true")
     parser.add_argument(
         "--root_dir",
         type=str,
@@ -448,7 +437,6 @@ def main():
 
     config = OmegaConf.load(args.config_path)
     config.no_save = args.no_save
-    config.no_visualize = args.no_visualize
 
     if args.b2d_root is not None:
         config.b2d_root = args.b2d_root
