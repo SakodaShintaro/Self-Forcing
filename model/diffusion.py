@@ -1,17 +1,37 @@
 from typing import Tuple
 
 import torch
+from torch import nn
 
-from model.base import BaseModel
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
 
-class CausalDiffusion(BaseModel):
+class CausalDiffusion(nn.Module):
     def __init__(self, args, device):
-        """
-        Initialize the Diffusion loss module.
-        """
-        super().__init__(args, device)
+        super().__init__()
+        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=True)
+        self.generator.model.requires_grad_(True)
+
+        self.text_encoder = WanTextEncoder()
+        self.text_encoder.requires_grad_(False)
+
+        self.vae = WanVAEWrapper()
+        self.vae.requires_grad_(False)
+
+        self.scheduler = self.generator.get_scheduler()
+        self.scheduler.timesteps = self.scheduler.timesteps.to(device)
+
+        self.device = device
+        self.args = args
+        self.dtype = torch.bfloat16 if args.mixed_precision else torch.float32
+        if hasattr(args, "denoising_step_list"):
+            self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long)
+            if args.warp_denoising_step:
+                timesteps = torch.cat(
+                    (self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))
+                )
+                self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
+
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
@@ -22,7 +42,6 @@ class CausalDiffusion(BaseModel):
         if args.gradient_checkpointing:
             self.generator.enable_gradient_checkpointing()
 
-        # Step 2: Initialize all hyperparameters
         self.num_train_timestep = args.num_train_timestep
         self.min_step = int(0.02 * self.num_train_timestep)
         self.max_step = int(0.98 * self.num_train_timestep)
@@ -32,19 +51,51 @@ class CausalDiffusion(BaseModel):
         # Noise augmentation in teacher forcing, we add small noise to clean context latents
         self.noise_augmentation_max_timestep = getattr(args, "noise_augmentation_max_timestep", 0)
 
-    def _initialize_models(self, args, device):
-        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=True)
-        self.generator.model.requires_grad_(True)
-
-        self.text_encoder = WanTextEncoder()
-        self.text_encoder.requires_grad_(False)
-
-        self.vae = WanVAEWrapper()
-        self.vae.requires_grad_(False)
-
-        # `BaseModel.__init__` reads `self.scheduler` afterwards, so set it here too.
-        self.scheduler = self.generator.get_scheduler()
-        self.scheduler.timesteps = self.scheduler.timesteps.to(device)
+    def _get_timestep(
+        self,
+        min_timestep: int,
+        max_timestep: int,
+        batch_size: int,
+        num_frame: int,
+        num_frame_per_block: int,
+        uniform_timestep: bool = False,
+    ) -> torch.Tensor:
+        """
+        Randomly generate a timestep tensor based on the generator's task type. It uniformly samples a timestep
+        from the range [min_timestep, max_timestep], and returns a tensor of shape [batch_size, num_frame].
+        - If uniform_timestep, it will use the same timestep for all frames.
+        - If not uniform_timestep, it will use a different timestep for each block.
+        """
+        if uniform_timestep:
+            timestep = torch.randint(
+                min_timestep, max_timestep, [batch_size, 1], device=self.device, dtype=torch.long
+            ).repeat(1, num_frame)
+            return timestep
+        else:
+            timestep = torch.randint(
+                min_timestep,
+                max_timestep,
+                [batch_size, num_frame],
+                device=self.device,
+                dtype=torch.long,
+            )
+            # make the noise level the same within every block
+            if self.independent_first_frame:
+                # the first frame is always kept the same
+                timestep_from_second = timestep[:, 1:]
+                timestep_from_second = timestep_from_second.reshape(
+                    timestep_from_second.shape[0], -1, num_frame_per_block
+                )
+                timestep_from_second[:, :, 1:] = timestep_from_second[:, :, 0:1]
+                timestep_from_second = timestep_from_second.reshape(
+                    timestep_from_second.shape[0], -1
+                )
+                timestep = torch.cat([timestep[:, 0:1], timestep_from_second], dim=1)
+            else:
+                timestep = timestep.reshape(timestep.shape[0], -1, num_frame_per_block)
+                timestep[:, :, 1:] = timestep[:, :, 0:1]
+                timestep = timestep.reshape(timestep.shape[0], -1)
+            return timestep
 
     def generator_loss(
         self,
