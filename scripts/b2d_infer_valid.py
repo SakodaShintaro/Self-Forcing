@@ -215,20 +215,24 @@ def main() -> None:
     print(f"loading base ckpt: {base_ckpt_path}")
     pipeline.generator.load_state_dict(_load_state_dict(base_ckpt_path), strict=True)
 
+    # LoRA-only path: always wrap the generator with the same adapter shape used
+    # at training time. Without --checkpoint_path the LoRA layers stay zero-init
+    # (== base behavior), giving you the pretrained baseline as a sanity run.
     lora_cfg = getattr(config, "lora", None)
+    if not (lora_cfg and lora_cfg.get("enabled", False)):
+        raise ValueError("This script requires `lora.enabled: true` in the config.")
+    from peft import LoraConfig, get_peft_model
+    pipeline.generator.model.requires_grad_(False)
+    peft_cfg = LoraConfig(
+        r=int(lora_cfg.rank),
+        lora_alpha=int(lora_cfg.alpha),
+        lora_dropout=float(lora_cfg.dropout),
+        target_modules=list(lora_cfg.target_modules),
+        bias="none",
+    )
+    pipeline.generator.model = get_peft_model(pipeline.generator.model, peft_cfg)
+
     if args.checkpoint_path:
-        if not (lora_cfg and lora_cfg.get("enabled", False)):
-            raise ValueError("--checkpoint_path requires lora.enabled=true in config.")
-        from peft import LoraConfig, get_peft_model
-        pipeline.generator.model.requires_grad_(False)
-        peft_cfg = LoraConfig(
-            r=int(lora_cfg.rank),
-            lora_alpha=int(lora_cfg.alpha),
-            lora_dropout=float(lora_cfg.dropout),
-            target_modules=list(lora_cfg.target_modules),
-            bias="none",
-        )
-        pipeline.generator.model = get_peft_model(pipeline.generator.model, peft_cfg)
         sd = _load_state_dict(resolve_checkpoint_path(args.checkpoint_path))
         missing, unexpected = pipeline.generator.load_state_dict(sd, strict=False)
         print(f"finetune load: {len(missing)} missing, {len(unexpected)} unexpected")

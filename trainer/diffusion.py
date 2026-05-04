@@ -84,28 +84,27 @@ class Trainer:
             }
             self.model.generator.load_state_dict(cleaned, strict=True)
 
-        # Step 2.2: Optionally attach LoRA adapters (after base load, before FSDP).
+        # Step 2.2: Attach LoRA adapters (after base load, before FSDP).
+        # This trainer is LoRA-only -- config must define a `lora` block.
         lora_cfg = getattr(config, "lora", None)
-        self.use_lora = bool(lora_cfg and lora_cfg.get("enabled", False))
-        if self.use_lora:
-            from peft import LoraConfig, get_peft_model
-            self.model.generator.model.requires_grad_(False)
-            peft_cfg = LoraConfig(
-                r=int(lora_cfg.get("rank", 16)),
-                lora_alpha=int(lora_cfg.get("alpha", 32)),
-                lora_dropout=float(lora_cfg.get("dropout", 0.0)),
-                target_modules=list(lora_cfg.get(
-                    "target_modules",
-                    ["self_attn.q", "self_attn.k", "self_attn.v", "self_attn.o",
-                     "cross_attn.q", "cross_attn.k", "cross_attn.v", "cross_attn.o"],
-                )),
-                bias="none",
+        if not (lora_cfg and lora_cfg.get("enabled", False)):
+            raise ValueError(
+                "DiffusionTrainer requires `lora.enabled: true` in the config."
             )
-            self.model.generator.model = get_peft_model(self.model.generator.model, peft_cfg)
-            if dist.get_rank() == 0:
-                self.model.generator.model.print_trainable_parameters()
+        from peft import LoraConfig, get_peft_model
+        self.model.generator.model.requires_grad_(False)
+        peft_cfg = LoraConfig(
+            r=int(lora_cfg.rank),
+            lora_alpha=int(lora_cfg.alpha),
+            lora_dropout=float(lora_cfg.get("dropout", 0.0)),
+            target_modules=list(lora_cfg.target_modules),
+            bias="none",
+        )
+        self.model.generator.model = get_peft_model(self.model.generator.model, peft_cfg)
+        if dist.get_rank() == 0:
+            self.model.generator.model.print_trainable_parameters()
 
-        # Step 2.3: FSDP wrap (LoRA layers, if any, get wrapped together with the base)
+        # Step 2.3: FSDP wrap (LoRA layers get wrapped together with the base)
         self.model.generator = fsdp_wrap(
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
@@ -205,7 +204,9 @@ class Trainer:
         self.generator_ema = None
         if (ema_weight is not None) and (ema_weight > 0.0):
             print(f"Setting up EMA with weight {ema_weight}")
-            self.generator_ema = EMA_FSDP(self.model.generator, decay=ema_weight)
+            self.generator_ema = EMA_FSDP(
+                self.model.generator, decay=ema_weight, trainable_only=True
+            )
 
         # Let's delete EMA params for early steps to save some computes at training and inference
         if self.step < config.ema_start_step:
@@ -216,8 +217,20 @@ class Trainer:
 
     def save(self):
         print("Start gathering distributed model states...")
-        generator_state_dict = fsdp_state_dict(
-            self.model.generator)
+        generator_state_dict = fsdp_state_dict(self.model.generator)
+
+        # LoRA-only save: drop frozen base weights so checkpoints stay tiny.
+        # Match by canonical (renamed) name to be robust to FSDP / checkpoint /
+        # torch.compile wrapper prefixes.
+        def _rename(k: str) -> str:
+            return (k.replace("_fsdp_wrapped_module.", "")
+                     .replace("_checkpoint_wrapped_module.", "")
+                     .replace("_orig_mod.", ""))
+        trainable_renamed = set(self.name_to_trainable_params.keys())
+        generator_state_dict = {
+            k: v for k, v in generator_state_dict.items()
+            if _rename(k) in trainable_renamed
+        }
 
         state_dict = {"generator": generator_state_dict}
         if self.generator_ema is not None:
@@ -317,7 +330,9 @@ class Trainer:
                         f"Setting up EMA with weight {ema_weight} at step {self.step}",
                         flush=True,
                     )
-                self.generator_ema = EMA_FSDP(self.model.generator, decay=ema_weight)
+                self.generator_ema = EMA_FSDP(
+                self.model.generator, decay=ema_weight, trainable_only=True
+            )
             else:
                 self.generator_ema.update(self.model.generator)
 

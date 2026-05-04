@@ -89,16 +89,25 @@ def launch_distributed_job(backend: str = "nccl"):
 
 
 class EMA_FSDP:
-    def __init__(self, fsdp_module: torch.nn.Module, decay: float = 0.999):
+    def __init__(
+        self,
+        fsdp_module: torch.nn.Module,
+        decay: float = 0.999,
+        trainable_only: bool = False,
+    ):
+        """If trainable_only=True, only params with requires_grad=True are
+        tracked (e.g. LoRA adapters), keeping the shadow tiny."""
         self.decay = decay
         self.shadow = {}
-        self._init_shadow(fsdp_module)
+        self._init_shadow(fsdp_module, trainable_only=trainable_only)
 
     @torch.no_grad()
-    def _init_shadow(self, fsdp_module):
+    def _init_shadow(self, fsdp_module, trainable_only: bool = False):
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         with FSDP.summon_full_params(fsdp_module, writeback=False):
             for n, p in fsdp_module.module.named_parameters():
+                if trainable_only and not p.requires_grad:
+                    continue
                 self.shadow[n] = p.detach().clone().float().cpu()
 
     @torch.no_grad()
