@@ -40,8 +40,20 @@ def _set_distributed_defaults() -> None:
 
 
 class Trainer:
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        *,
+        run_dir: str,
+        config_name: str,
+        b2d_root: str,
+        no_save: bool,
+        disable_wandb: bool,
+    ):
         self.config = config
+        self.run_dir = run_dir
+        self.no_save = no_save
+        self.disable_wandb = disable_wandb
         self.step = 0
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
@@ -54,7 +66,6 @@ class Trainer:
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
         self.is_main_process = global_rank == 0
-        self.disable_wandb = config.disable_wandb
 
         # use a random seed for the training
         if config.seed == 0:
@@ -71,42 +82,41 @@ class Trainer:
                 wandb.login(host=config.wandb_host or None, key=config.wandb_key)
             wandb.init(
                 config=OmegaConf.to_container(config, resolve=True),
-                name=config.config_name,
+                name=config_name,
                 mode="online",
                 entity=config.wandb_entity or None,
                 project=config.wandb_project or "self-forcing",
-                dir=config.wandb_save_dir or None,
+                dir=run_dir,
             )
 
-        self.output_path = config.logdir
-
         # Step 2: Initialize the model
-        self.model = CausalDiffusion(config, device=self.device)
+        self.model = CausalDiffusion(
+            device=self.device,
+            timestep_shift=config.timestep_shift,
+            num_frame_per_block=config.num_frame_per_block,
+            mixed_precision=config.mixed_precision,
+            gradient_checkpointing=config.gradient_checkpointing,
+        )
 
         # Step 2.1: Load pretrained generator weights BEFORE LoRA / FSDP wrap.
         # (LoRA wrap renames base linear keys, so the upstream checkpoint must be
         # applied to the bare CausalWanModel first.)
-        if getattr(config, "generator_ckpt", False):
-            ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
-            print(f"Loading pretrained generator from {ckpt_path}")
-            cleaned = load_generator_state_dict(
-                ckpt_path, explicit_key=getattr(config, "generator_ckpt_key", None)
-            )
-            self.model.generator.load_state_dict(cleaned, strict=True)
+        ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
+        print(f"Loading pretrained generator from {ckpt_path}")
+        cleaned = load_generator_state_dict(ckpt_path, explicit_key=config.generator_ckpt_key)
+        self.model.generator.load_state_dict(cleaned, strict=True)
 
         # Step 2.2: Attach LoRA adapters (after base load, before FSDP).
-        # This trainer is LoRA-only -- config must define a `lora` block.
-        lora_cfg = getattr(config, "lora", None)
-        if not (lora_cfg and lora_cfg.get("enabled", False)):
+        if not config.lora.enabled:
             raise ValueError("Trainer requires `lora.enabled: true` in the config.")
         from peft import LoraConfig, get_peft_model
 
         self.model.generator.model.requires_grad_(False)
         peft_cfg = LoraConfig(
-            r=int(lora_cfg.rank),
-            lora_alpha=int(lora_cfg.alpha),
-            lora_dropout=float(lora_cfg.get("dropout", 0.0)),
-            target_modules=list(lora_cfg.target_modules),
+            r=int(config.lora.rank),
+            lora_alpha=int(config.lora.alpha),
+            lora_dropout=float(config.lora.dropout),
+            target_modules=list(config.lora.target_modules),
             bias="none",
         )
         self.model.generator.model = get_peft_model(self.model.generator.model, peft_cfg)
@@ -126,7 +136,7 @@ class Trainer:
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
-            cpu_offload=getattr(config, "text_encoder_cpu_offload", False),
+            cpu_offload=config.text_encoder_cpu_offload,
         )
 
         self.generator_optimizer = torch.optim.AdamW(
@@ -138,7 +148,7 @@ class Trainer:
 
         # Step 3: Initialize the dataloader
         dataset = Bench2DriveLatentDataset(
-            b2d_root=config.b2d_root,
+            b2d_root=b2d_root,
             split=config.b2d_split,
             num_frames=config.image_or_video_shape[1],
             fixed_caption=config.b2d_caption,
@@ -156,12 +166,12 @@ class Trainer:
 
         # Step 3.1: Optional validation loader.
         # Driven by config.valid_iters (0 disables) and config.valid_batches.
-        self.valid_iters = int(getattr(config, "valid_iters", 0) or 0)
-        self.valid_batches = int(getattr(config, "valid_batches", 0) or 0)
+        self.valid_iters = int(config.valid_iters)
+        self.valid_batches = int(config.valid_batches)
         self.valid_dataloader = None
         if self.valid_iters > 0 and self.valid_batches > 0:
             valid_dataset = Bench2DriveLatentDataset(
-                b2d_root=config.b2d_root,
+                b2d_root=b2d_root,
                 split="valid",
                 num_frames=config.image_or_video_shape[1],
                 fixed_caption=config.b2d_caption,
@@ -212,17 +222,11 @@ class Trainer:
             state_dict["generator_ema"] = self.generator_ema.state_dict()
 
         if self.is_main_process:
-            os.makedirs(
-                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}"), exist_ok=True
-            )
-            torch.save(
-                state_dict,
-                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
-            )
-            print(
-                "Model saved to",
-                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
-            )
+            ckpt_dir = os.path.join(self.run_dir, f"checkpoint_model_{self.step:06d}")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_dir, "model.pt")
+            torch.save(state_dict, ckpt_path)
+            print(f"Model saved to {ckpt_path}")
 
     def train_one_step(self, batch):
         self.log_iters = 1
@@ -233,7 +237,6 @@ class Trainer:
         # Step 1: Get the next batch of text prompts and precomputed latents
         text_prompts = batch["prompts"]
         clean_latent = batch["ode_latent"][:, -1].to(device=self.device, dtype=self.dtype)
-        image_latent = clean_latent[:, 0:1]
 
         batch_size = len(text_prompts)
         image_or_video_shape = list(self.config.image_or_video_shape)
@@ -248,7 +251,6 @@ class Trainer:
             image_or_video_shape=image_or_video_shape,
             conditional_dict=conditional_dict,
             clean_latent=clean_latent,
-            initial_latent=image_latent,
         )
         self.generator_optimizer.zero_grad()
         generator_loss.backward()
@@ -319,10 +321,6 @@ class Trainer:
                     break
                 text_prompts = batch["prompts"]
                 clean_latent = batch["ode_latent"][:, -1].to(device=self.device, dtype=self.dtype)
-                image_latent = clean_latent[
-                    :,
-                    0:1,
-                ]
                 batch_size = len(text_prompts)
                 shape = list(image_or_video_shape)
                 shape[0] = batch_size
@@ -333,7 +331,6 @@ class Trainer:
                     image_or_video_shape=shape,
                     conditional_dict=conditional_dict,
                     clean_latent=clean_latent,
-                    initial_latent=image_latent,
                 )
                 losses.append(loss.detach().float())
         finally:
@@ -357,11 +354,11 @@ class Trainer:
         return (local_sum / denom).item()
 
     def train(self):
-        max_steps = getattr(self.config, "max_steps", None)
-        while max_steps is None or self.step < max_steps:
+        max_steps = self.config.max_steps
+        while self.step < max_steps:
             batch = next(self.dataloader)
             self.train_one_step(batch)
-            if (not self.config.no_save) and self.step % self.config.log_iters == 0:
+            if (not self.no_save) and self.step % self.config.log_iters == 0:
                 torch.cuda.empty_cache()
                 self.save()
                 torch.cuda.empty_cache()
@@ -389,8 +386,8 @@ class Trainer:
                             step=self.step,
                         )
                     self.previous_time = current_time
-        # Always save the final checkpoint at exit if we ran to a hard step cap.
-        if max_steps is not None and not self.config.no_save:
+        # Always save the final checkpoint at exit.
+        if not self.no_save:
             torch.cuda.empty_cache()
             self.save()
 
@@ -398,59 +395,41 @@ class Trainer:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, required=True)
-    parser.add_argument("--no_save", action="store_true")
     parser.add_argument(
         "--root_dir",
         type=str,
-        default=None,
-        help="If set, create {root_dir}/{stamp}_{config_name}/ and use it for "
-        "checkpoints, wandb files, and a tee'd train.log.",
+        required=True,
+        help="Parent dir for run output. Each invocation creates "
+        "<root_dir>/<YYYYmmdd_HHMMSS>_<config_name>/.",
     )
-    parser.add_argument(
-        "--logdir",
-        type=str,
-        default="",
-        help="Explicit log/checkpoint dir (advanced; use --root-dir instead).",
-    )
-    parser.add_argument("--disable_wandb", action="store_true")
     parser.add_argument(
         "--b2d_root",
         type=str,
-        default=None,
-        help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
-        "Required; overrides config.b2d_root if both are set.",
+        required=True,
+        help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/).",
     )
-
+    parser.add_argument("--no_save", action="store_true")
+    parser.add_argument("--disable_wandb", action="store_true")
     args = parser.parse_args()
-
-    if args.root_dir is not None:
-        if args.logdir:
-            parser.error("--root-dir cannot be combined with --logdir.")
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        config_tag = os.path.basename(args.config_path).split(".")[0]
-        run_dir = os.path.join(args.root_dir, f"{stamp}_{config_tag}")
-        os.makedirs(run_dir, exist_ok=True)
-        args.logdir = run_dir
-        print(f"run dir: {run_dir}", flush=True)
 
     _set_distributed_defaults()
 
-    config = OmegaConf.load(args.config_path)
-    config.no_save = args.no_save
-
-    if args.b2d_root is not None:
-        config.b2d_root = args.b2d_root
-    if not getattr(config, "b2d_root", None):
-        parser.error("--b2d_root is required (or set config.b2d_root).")
-
-    # get the filename of config_path
     config_name = os.path.basename(args.config_path).split(".")[0]
-    config.config_name = config_name
-    config.logdir = args.logdir
-    config.wandb_save_dir = args.logdir
-    config.disable_wandb = args.disable_wandb
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(args.root_dir, f"{stamp}_{config_name}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"run dir: {run_dir}", flush=True)
 
-    trainer = Trainer(config)
+    config = OmegaConf.load(args.config_path)
+
+    trainer = Trainer(
+        config,
+        run_dir=run_dir,
+        config_name=config_name,
+        b2d_root=args.b2d_root,
+        no_save=args.no_save,
+        disable_wandb=args.disable_wandb,
+    )
     trainer.train()
 
     wandb.finish()

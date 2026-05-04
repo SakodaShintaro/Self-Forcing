@@ -4,30 +4,39 @@ import torch
 
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
+# Sigma-warped denoising schedule used at inference time. The four anchors are
+# the standard Self-Forcing DMD distillation grid; we sigma-warp them against
+# the FlowMatch scheduler in __init__.
+_DENOISING_STEPS = (1000, 750, 500, 250)
+
 
 class CausalInferencePipeline(torch.nn.Module):
-    def __init__(self, args):
+    def __init__(
+        self,
+        timestep_shift: float,
+        num_frame_per_block: int,
+        context_noise: int,
+    ):
         super().__init__()
         # Step 1: Initialize all models
-        self.generator = WanDiffusionWrapper(**args.model_kwargs)
+        self.generator = WanDiffusionWrapper(timestep_shift=timestep_shift)
         self.text_encoder = WanTextEncoder()
         self.vae = WanVAEWrapper()
 
-        # Step 2: Initialize all causal hyperparmeters
+        # Step 2: Initialize all causal hyperparameters
         self.scheduler = self.generator.get_scheduler()
-        # Inference uses sigma-warped denoising steps (training uses raw).
-        self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long)
+        steps = torch.tensor(_DENOISING_STEPS, dtype=torch.long)
         timesteps = torch.cat(
             (self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))
         )
-        self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
+        self.denoising_step_list = timesteps[1000 - steps]
 
         self.num_transformer_blocks = 30
         self.frame_seq_length = 1560
 
         self.kv_cache1 = None
-        self.context_noise = args.context_noise
-        self.num_frame_per_block = args.num_frame_per_block
+        self.context_noise = context_noise
+        self.num_frame_per_block = num_frame_per_block
         self.local_attn_size = self.generator.model.local_attn_size
 
         print(f"KV inference with {self.num_frame_per_block} frames per block")

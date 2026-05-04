@@ -215,8 +215,6 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     config = OmegaConf.load(args.config_path)
-    config.b2d_root = args.b2d_root
-    config.denoising_step_list = [1000, 750, 500, 250]
 
     device = torch.device("cuda")
     set_seed(args.seed)
@@ -224,7 +222,11 @@ def main() -> None:
 
     print(f"output dir: {out_dir}")
     print("building pipeline")
-    pipeline = CausalInferencePipeline(config)
+    pipeline = CausalInferencePipeline(
+        timestep_shift=config.timestep_shift,
+        num_frame_per_block=config.num_frame_per_block,
+        context_noise=config.context_noise,
+    )
 
     base_ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
     print(f"loading base ckpt: {base_ckpt_path}")
@@ -270,7 +272,7 @@ def main() -> None:
     torch.cuda.empty_cache()
 
     # Discover valid episodes with precomputed latents
-    b2d_root = Path(config.b2d_root)
+    b2d_root = Path(args.b2d_root)
     splits = json.load(open(b2d_root / "splits.json"))
     latent_dir = b2d_root / "latents" / "valid"
     episodes = [ep for ep in splits["valid"] if (latent_dir / f"{ep}.pt").exists()]

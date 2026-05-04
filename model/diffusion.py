@@ -7,9 +7,16 @@ from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
 
 class CausalDiffusion(nn.Module):
-    def __init__(self, args, device):
+    def __init__(
+        self,
+        device,
+        timestep_shift: float,
+        num_frame_per_block: int,
+        mixed_precision: bool,
+        gradient_checkpointing: bool,
+    ):
         super().__init__()
-        self.generator = WanDiffusionWrapper(**args.model_kwargs)
+        self.generator = WanDiffusionWrapper(timestep_shift=timestep_shift)
         self.generator.model.requires_grad_(True)
 
         self.text_encoder = WanTextEncoder()
@@ -22,13 +29,13 @@ class CausalDiffusion(nn.Module):
         self.scheduler.timesteps = self.scheduler.timesteps.to(device)
 
         self.device = device
-        self.dtype = torch.bfloat16 if args.mixed_precision else torch.float32
+        self.dtype = torch.bfloat16 if mixed_precision else torch.float32
 
-        self.num_frame_per_block = args.num_frame_per_block
+        self.num_frame_per_block = num_frame_per_block
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
 
-        if args.gradient_checkpointing:
+        if gradient_checkpointing:
             self.generator.enable_gradient_checkpointing()
 
     def _get_timestep(
@@ -60,7 +67,6 @@ class CausalDiffusion(nn.Module):
         image_or_video_shape,
         conditional_dict: dict,
         clean_latent: torch.Tensor,
-        initial_latent: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, dict]:
         """Add noise at a random per-block timestep and minimise flow-matching MSE.
 
