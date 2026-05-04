@@ -11,9 +11,14 @@ from omegaconf import OmegaConf
 
 from model import CausalDiffusion
 from utils.b2d_dataset import Bench2DriveLatentDataset
-from utils.dataset import ShardingLMDBDataset, cycle
 from utils.distributed import EMA_FSDP, barrier, fsdp_state_dict, fsdp_wrap, launch_distributed_job
 from utils.misc import resolve_checkpoint_path, set_seed
+
+
+def cycle(dl):
+    while True:
+        for data in dl:
+            yield data
 
 
 def _set_distributed_defaults() -> None:
@@ -147,16 +152,12 @@ class Trainer:
         )
 
         # Step 3: Initialize the dataloader
-        dataset_type = getattr(config, "dataset_type", "lmdb")
-        if dataset_type == "b2d_latent":
-            dataset = Bench2DriveLatentDataset(
-                b2d_root=config.b2d_root,
-                split=config.b2d_split,
-                num_frames=config.image_or_video_shape[1],
-                fixed_caption=config.b2d_caption,
-            )
-        else:
-            dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
+        dataset = Bench2DriveLatentDataset(
+            b2d_root=config.b2d_root,
+            split=config.b2d_split,
+            num_frames=config.image_or_video_shape[1],
+            fixed_caption=config.b2d_caption,
+        )
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset, shuffle=True, drop_last=True
         )
@@ -168,12 +169,12 @@ class Trainer:
             print("DATASET SIZE %d" % len(dataset))
         self.dataloader = cycle(dataloader)
 
-        # Step 3.1: Optional validation loader (b2d_latent only).
+        # Step 3.1: Optional validation loader.
         # Driven by config.valid_iters (0 disables) and config.valid_batches.
         self.valid_iters = int(getattr(config, "valid_iters", 0) or 0)
         self.valid_batches = int(getattr(config, "valid_batches", 0) or 0)
         self.valid_dataloader = None
-        if dataset_type == "b2d_latent" and self.valid_iters > 0 and self.valid_batches > 0:
+        if self.valid_iters > 0 and self.valid_batches > 0:
             valid_dataset = Bench2DriveLatentDataset(
                 b2d_root=config.b2d_root,
                 split="valid",
@@ -492,7 +493,7 @@ def main():
         type=str,
         default=None,
         help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
-        "Required when dataset_type=b2d_latent; overrides config.b2d_root if both are set.",
+        "Required; overrides config.b2d_root if both are set.",
     )
 
     args = parser.parse_args()
@@ -515,10 +516,8 @@ def main():
 
     if args.b2d_root is not None:
         config.b2d_root = args.b2d_root
-    if getattr(config, "dataset_type", None) == "b2d_latent" and not getattr(
-        config, "b2d_root", None
-    ):
-        parser.error("dataset_type=b2d_latent requires --b2d_root (or config.b2d_root) to be set.")
+    if not getattr(config, "b2d_root", None):
+        parser.error("--b2d_root is required (or set config.b2d_root).")
 
     # get the filename of config_path
     config_name = os.path.basename(args.config_path).split(".")[0]

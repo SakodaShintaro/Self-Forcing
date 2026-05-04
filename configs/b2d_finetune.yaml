@@ -60,8 +60,7 @@ model_kwargs:
   timestep_shift: 5.0
 
 # --- dataset ---
-dataset_type: b2d_latent
-data_path: ""   # unused for b2d_latent but kept for legacy code paths
+# b2d_root is set per-machine via `--b2d_root` on the train.py CLI (not stored here).
 b2d_split: train
 b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
 negative_prompt: ""

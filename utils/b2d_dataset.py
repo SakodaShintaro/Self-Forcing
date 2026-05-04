@@ -7,9 +7,9 @@ Layout (anchored at b2d_root, the bench2drive raw-data directory):
 Each episode .pt file stores a (T_lat, 16, 60, 104) bf16 tensor. Each __getitem__
 samples a contiguous `num_frames`-latent window from a random episode-and-offset.
 
-Output shape is (1, num_frames, 16, 60, 104) under key `ode_latent`, matching the
-convention of `ShardingLMDBDataset` (where the leading dim is "denoising step";
-the trainer indexes `batch["ode_latent"][:, -1]` to take the clean latent).
+Output shape is (1, num_frames, 16, 60, 104) under key `ode_latent` (the leading
+dim is "denoising step"; the trainer indexes `batch["ode_latent"][:, -1]` to take
+the clean latent).
 """
 
 from __future__ import annotations
