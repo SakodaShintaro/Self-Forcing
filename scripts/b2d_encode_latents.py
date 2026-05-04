@@ -27,6 +27,18 @@ from utils.wan_wrapper import WanVAEWrapper  # noqa: E402
 TARGET_H, TARGET_W = 480, 832  # Wan T2V-1.3B expected resolution
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--src", type=Path, required=True)
+    parser.add_argument(
+        "--split",
+        choices=("train", "valid", "all"),
+        default="all",
+        help="Which split to encode (default: all).",
+    )
+    return parser.parse_args()
+
+
 def encode_episode(
     vae: WanVAEWrapper, episode_dir: Path, device: torch.device
 ) -> torch.Tensor | None:
@@ -61,15 +73,7 @@ def encode_episode(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--src", type=Path, required=True)
-    parser.add_argument(
-        "--split",
-        choices=("train", "valid", "all"),
-        default="all",
-        help="Which split to encode (default: all).",
-    )
-    args = parser.parse_args()
+    args = parse_args()
 
     device = torch.device("cuda")
     splits_path = args.src / "splits.json"

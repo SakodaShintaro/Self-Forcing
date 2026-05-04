@@ -14,18 +14,7 @@ EPISODE_RE = re.compile(
 )
 
 
-def parse_episode(name: str) -> dict | None:
-    m = EPISODE_RE.match(name)
-    return m.groupdict() if m else None
-
-
-def is_valid_route(route_id: str, valid_mod: int) -> bool:
-    """Deterministic by hashing route id; ~ 1/valid_mod fraction goes to valid."""
-    h = hashlib.md5(route_id.encode()).hexdigest()
-    return int(h, 16) % valid_mod == 0
-
-
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--src",
@@ -39,7 +28,22 @@ def main() -> None:
         default=20,
         help="1/valid_mod of unique Route IDs go to valid (default: 20 -> ~5%%).",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def parse_episode(name: str) -> dict | None:
+    m = EPISODE_RE.match(name)
+    return m.groupdict() if m else None
+
+
+def is_valid_route(route_id: str, valid_mod: int) -> bool:
+    """Deterministic by hashing route id; ~ 1/valid_mod fraction goes to valid."""
+    h = hashlib.md5(route_id.encode()).hexdigest()
+    return int(h, 16) % valid_mod == 0
+
+
+def main() -> None:
+    args = parse_args()
 
     out_path = args.src / "splits.json"
 

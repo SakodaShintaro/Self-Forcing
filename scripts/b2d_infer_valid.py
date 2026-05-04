@@ -51,6 +51,63 @@ from utils.misc import load_generator_state_dict, resolve_checkpoint_path, set_s
 _INFERENCE_KEY_ORDER = ("generator_ema", "generator", "model")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config_path", type=str, required=True)
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Optional LoRA fine-tune ckpt. None = base self_forcing_dmd.pt only.",
+    )
+    parser.add_argument(
+        "--b2d_root",
+        type=str,
+        required=True,
+        help="Bench2Drive root (contains splits.json and latents/valid/).",
+    )
+    parser.add_argument(
+        "--out_root",
+        type=Path,
+        default=None,
+        help="Output root. Required only when --checkpoint_path is omitted; "
+        "with a checkpoint, results are saved next to it.",
+    )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default="eval",
+        help="Suffix appended to the timestamped output directory name.",
+    )
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=None,
+        help="Limit to first N valid episodes (default: all).",
+    )
+    parser.add_argument(
+        "--num_context_blocks",
+        type=int,
+        default=1,
+        help="K: how many GT blocks to feed as context for each prediction.",
+    )
+    parser.add_argument(
+        "--num_pred_blocks",
+        type=int,
+        default=6,
+        help="M: how many sliding predictions to make per episode "
+        "(K+M total decoded blocks; default 1+6 = 7 blocks = 21 latents).",
+    )
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--fps", type=int, default=10, help="Mp4 playback fps (bench2drive native rate is 10)."
+    )
+    args = parser.parse_args()
+    if args.checkpoint_path is None and args.out_root is None:
+        parser.error("--out_root is required when --checkpoint_path is not given.")
+    return args
+
+
 class _CachedTextEncoder(torch.nn.Module):
     """Stand-in for WanTextEncoder when the caption is fixed for the whole run."""
 
@@ -153,64 +210,12 @@ def _side_by_side(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config_path", type=str, required=True)
-    parser.add_argument(
-        "--checkpoint_path",
-        type=str,
-        default=None,
-        help="Optional LoRA fine-tune ckpt. None = base self_forcing_dmd.pt only.",
-    )
-    parser.add_argument(
-        "--b2d_root",
-        type=str,
-        required=True,
-        help="Bench2Drive root (contains splits.json and latents/valid/).",
-    )
-    parser.add_argument(
-        "--out_root",
-        type=Path,
-        default=None,
-        help="Output root. Required only when --checkpoint_path is omitted; "
-        "with a checkpoint, results are saved next to it.",
-    )
-    parser.add_argument(
-        "--tag",
-        type=str,
-        default="eval",
-        help="Suffix appended to the timestamped output directory name.",
-    )
-    parser.add_argument(
-        "--num_episodes",
-        type=int,
-        default=None,
-        help="Limit to first N valid episodes (default: all).",
-    )
-    parser.add_argument(
-        "--num_context_blocks",
-        type=int,
-        default=1,
-        help="K: how many GT blocks to feed as context for each prediction.",
-    )
-    parser.add_argument(
-        "--num_pred_blocks",
-        type=int,
-        default=6,
-        help="M: how many sliding predictions to make per episode "
-        "(K+M total decoded blocks; default 1+6 = 7 blocks = 21 latents).",
-    )
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument(
-        "--fps", type=int, default=10, help="Mp4 playback fps (bench2drive native rate is 10)."
-    )
-    args = parser.parse_args()
+    args = parse_args()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.checkpoint_path:
         out_dir = Path(args.checkpoint_path).parent / f"{stamp}_{args.tag}"
     else:
-        if args.out_root is None:
-            parser.error("--out_root is required when --checkpoint_path is not given.")
         out_dir = args.out_root / f"{stamp}_{args.tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,8 +1,8 @@
-# Fine-tune Self-Forcing on bench2drive latents.
+# Fine-tune Self-Forcing on bench2drive latents (single GPU).
 # Pre-requisites (anchored at b2d_root):
 #   1. scripts/b2d_split.py --src <b2d_root>          -> <b2d_root>/splits.json
 #   2. scripts/b2d_encode_latents.py --src <b2d_root> -> <b2d_root>/latents/{train,valid}/<episode>.pt
-# Launch (single visible GPU; FSDP degrades to a no-op shard):
+# Launch:
 #   uv run python train.py \
 #       --config_path configs/b2d_finetune.yaml \
 #       --root_dir /path/to/results \
@@ -48,12 +48,6 @@ timestep_shift: 5.0
 # b2d_root is set per-machine via `--b2d_root` on the train.py CLI (not stored here).
 b2d_split: train
 b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
-
-# --- FSDP / sharding ---
-generator_fsdp_wrap_strategy: size
-text_encoder_fsdp_wrap_strategy: size
-text_encoder_cpu_offload: true
-sharding_strategy: hybrid_full
 
 # --- optimizer (LoRA-friendly LR; bump higher than full fine-tune since adapter init is identity) ---
 seed: 0
