@@ -441,7 +441,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     """
 
     ignore_for_config = ["patch_size", "cross_attn_norm", "qk_norm", "text_dim"]
-    _no_split_modules = ["WanAttentionBlock"]
+    _no_split_modules = ["CausalWanAttentionBlock"]
     _supports_gradient_checkpointing = True
 
     @register_to_config
