@@ -602,24 +602,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             device=device,
         )
 
-        import torch.distributed as dist
-
-        if not dist.is_initialized() or dist.get_rank() == 0:
-            print(
-                f" cache a block wise causal mask with block size of {num_frame_per_block} frames"
-            )
-            print(block_mask)
-
-        # import imageio
-        # import numpy as np
-        # from torch.nn.attention.flex_attention import create_mask
-
-        # mask = create_mask(attention_mask, B=None, H=None, Q_LEN=total_length +
-        #                    padded_length, KV_LEN=total_length + padded_length, device=device)
-        # import cv2
-        # mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-        # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
-
         return block_mask
 
     def _forward_inference(
