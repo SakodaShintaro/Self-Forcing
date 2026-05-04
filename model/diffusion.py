@@ -22,7 +22,6 @@ class CausalDiffusion(nn.Module):
         self.scheduler.timesteps = self.scheduler.timesteps.to(device)
 
         self.device = device
-        self.args = args
         self.dtype = torch.bfloat16 if args.mixed_precision else torch.float32
 
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)

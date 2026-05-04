@@ -1,7 +1,6 @@
 import math
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
@@ -9,10 +8,9 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex
 
 from wan.modules.attention import attention
 from wan.modules.model import (
-    WAN_CROSSATTENTION_CLASSES,
-    MLPProj,
     WanLayerNorm,
     WanRMSNorm,
+    WanT2VCrossAttention,
     rope_apply,
     rope_params,
     sinusoidal_embedding_1d,
@@ -86,7 +84,6 @@ class CausalWanSelfAttention(nn.Module):
         block_mask,
         kv_cache=None,
         current_start=0,
-        cache_start=None,
     ):
         r"""
         Args:
@@ -97,8 +94,6 @@ class CausalWanSelfAttention(nn.Module):
             block_mask (BlockMask)
         """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-        if cache_start is None:
-            cache_start = current_start
 
         # query, key, value function
         def qkv_fn(x):
@@ -300,15 +295,14 @@ class CausalWanSelfAttention(nn.Module):
 class CausalWanAttentionBlock(nn.Module):
     def __init__(
         self,
-        cross_attn_type,
         dim,
         ffn_dim,
         num_heads,
-        local_attn_size=-1,
-        sink_size=0,
-        qk_norm=True,
-        cross_attn_norm=False,
-        eps=1e-6,
+        local_attn_size,
+        sink_size,
+        qk_norm,
+        cross_attn_norm,
+        eps,
     ):
         super().__init__()
         self.dim = dim
@@ -327,9 +321,7 @@ class CausalWanAttentionBlock(nn.Module):
         self.norm3 = (
             WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
         )
-        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](
-            dim, num_heads, (-1, -1), qk_norm, eps
-        )
+        self.cross_attn = WanT2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim)
@@ -351,7 +343,6 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache=None,
         crossattn_cache=None,
         current_start=0,
-        cache_start=None,
     ):
         r"""
         Args:
@@ -362,10 +353,7 @@ class CausalWanAttentionBlock(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         num_frames, frame_seqlen = e.shape[1], x.shape[1] // e.shape[1]
-        # assert e.dtype == torch.float32
-        # with amp.autocast(dtype=torch.float32):
         e = (self.modulation.unsqueeze(1) + e).chunk(6, dim=2)
-        # assert e[0].dtype == torch.float32
 
         # self-attention
         y = self.self_attn(
@@ -378,7 +366,6 @@ class CausalWanAttentionBlock(nn.Module):
             block_mask,
             kv_cache,
             current_start,
-            cache_start,
         )
 
         # with amp.autocast(dtype=torch.float32):
@@ -447,7 +434,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
         self,
-        model_type="t2v",
         patch_size=(1, 2, 2),
         text_len=512,
         in_dim=16,
@@ -465,47 +451,26 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         eps=1e-6,
     ):
         r"""
-        Initialize the diffusion model backbone.
+        Wan 2.1 T2V causal-attention DiT backbone.
+
+        Default values reflect the published Wan2.1-T2V-1.3B configuration that
+        ships in the upstream HF repo; loading via ``from_pretrained`` overrides
+        them with the values stored in ``config.json``.
 
         Args:
-            model_type (`str`, *optional*, defaults to 't2v'):
-                Model variant - 't2v' (text-to-video) or 'i2v' (image-to-video)
-            patch_size (`tuple`, *optional*, defaults to (1, 2, 2)):
-                3D patch dimensions for video embedding (t_patch, h_patch, w_patch)
-            text_len (`int`, *optional*, defaults to 512):
-                Fixed length for text embeddings
-            in_dim (`int`, *optional*, defaults to 16):
-                Input video channels (C_in)
-            dim (`int`, *optional*, defaults to 2048):
-                Hidden dimension of the transformer
-            ffn_dim (`int`, *optional*, defaults to 8192):
-                Intermediate dimension in feed-forward network
-            freq_dim (`int`, *optional*, defaults to 256):
-                Dimension for sinusoidal time embeddings
-            text_dim (`int`, *optional*, defaults to 4096):
-                Input dimension for text embeddings
-            out_dim (`int`, *optional*, defaults to 16):
-                Output video channels (C_out)
-            num_heads (`int`, *optional*, defaults to 16):
-                Number of attention heads
-            num_layers (`int`, *optional*, defaults to 32):
-                Number of transformer blocks
-            local_attn_size (`int`, *optional*, defaults to -1):
-                Window size for temporal local attention (-1 indicates global attention)
-            sink_size (`int`, *optional*, defaults to 0):
-                Size of the attention sink, we keep the first `sink_size` frames unchanged when rolling the KV cache
-            qk_norm (`bool`, *optional*, defaults to True):
-                Enable query/key normalization
-            cross_attn_norm (`bool`, *optional*, defaults to False):
-                Enable cross-attention normalization
-            eps (`float`, *optional*, defaults to 1e-6):
-                Epsilon value for normalization layers
+            patch_size: 3D patch dimensions for video embedding (t_patch, h_patch, w_patch).
+            text_len: Fixed length for text embeddings.
+            in_dim / out_dim: Input / output video channels.
+            dim: Hidden dimension of the transformer.
+            ffn_dim: Intermediate dimension in the feed-forward network.
+            freq_dim: Dimension for sinusoidal time embeddings.
+            text_dim: Input dimension for text embeddings.
+            num_heads / num_layers: Attention heads / transformer blocks.
+            local_attn_size: Window size for temporal local attention (-1 = global).
+            sink_size: Number of leading frames pinned in the rolling KV cache.
+            qk_norm / cross_attn_norm / eps: Normalisation knobs.
         """
-
         super().__init__()
-
-        assert model_type in ["t2v", "i2v"]
-        self.model_type = model_type
 
         self.patch_size = patch_size
         self.text_len = text_len
@@ -534,11 +499,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks
-        cross_attn_type = "t2v_cross_attn" if model_type == "t2v" else "i2v_cross_attn"
         self.blocks = nn.ModuleList(
             [
                 CausalWanAttentionBlock(
-                    cross_attn_type,
                     dim,
                     ffn_dim,
                     num_heads,
@@ -567,9 +530,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             dim=1,
         )
 
-        if model_type == "i2v":
-            self.img_emb = MLPProj(1280, dim)
-
         # initialize weights
         self.init_weights()
 
@@ -578,7 +538,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.block_mask = None
 
         self.num_frame_per_block = 1
-        self.independent_first_frame = False
 
     def _set_gradient_checkpointing(self, *args, **kwargs):
         # Compatibility shim across diffusers versions:
@@ -663,244 +622,35 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         return block_mask
 
-    @staticmethod
-    def _prepare_teacher_forcing_mask(
-        device: torch.device | str,
-        num_frames: int = 21,
-        frame_seqlen: int = 1560,
-        num_frame_per_block=1,
-    ) -> BlockMask:
-        """
-        we will divide the token sequence into the following format
-        [1 latent frame] [1 latent frame] ... [1 latent frame]
-        We use flexattention to construct the attention mask
-        """
-        # debug
-        DEBUG = False
-        if DEBUG:
-            num_frames = 9
-            frame_seqlen = 256
-
-        total_length = num_frames * frame_seqlen * 2
-
-        # we do right padding to get to a multiple of 128
-        padded_length = math.ceil(total_length / 128) * 128 - total_length
-
-        clean_ends = num_frames * frame_seqlen
-        # for clean context frames, we can construct their flex attention mask based on a [start, end] interval
-        context_ends = torch.zeros(total_length + padded_length, device=device, dtype=torch.long)
-        # for noisy frames, we need two intervals to construct the flex attention mask [context_start, context_end] [noisy_start, noisy_end]
-        noise_context_starts = torch.zeros(
-            total_length + padded_length, device=device, dtype=torch.long
-        )
-        noise_context_ends = torch.zeros(
-            total_length + padded_length, device=device, dtype=torch.long
-        )
-        noise_noise_starts = torch.zeros(
-            total_length + padded_length, device=device, dtype=torch.long
-        )
-        noise_noise_ends = torch.zeros(
-            total_length + padded_length, device=device, dtype=torch.long
-        )
-
-        # Block-wise causal mask will attend to all elements that are before the end of the current chunk
-        attention_block_size = frame_seqlen * num_frame_per_block
-        frame_indices = torch.arange(
-            start=0,
-            end=num_frames * frame_seqlen,
-            step=attention_block_size,
-            device=device,
-            dtype=torch.long,
-        )
-
-        # attention for clean context frames
-        for start in frame_indices:
-            context_ends[start : start + attention_block_size] = start + attention_block_size
-
-        noisy_image_start_list = torch.arange(
-            num_frames * frame_seqlen,
-            total_length,
-            step=attention_block_size,
-            device=device,
-            dtype=torch.long,
-        )
-        noisy_image_end_list = noisy_image_start_list + attention_block_size
-
-        # attention for noisy frames
-        for block_index, (start, end) in enumerate(
-            zip(noisy_image_start_list, noisy_image_end_list)
-        ):
-            # attend to noisy tokens within the same block
-            noise_noise_starts[start:end] = start
-            noise_noise_ends[start:end] = end
-            # attend to context tokens in previous blocks
-            # noise_context_starts[start:end] = 0
-            noise_context_ends[start:end] = block_index * attention_block_size
-
-        def attention_mask(b, h, q_idx, kv_idx):
-            # first design the mask for clean frames
-            clean_mask = (q_idx < clean_ends) & (kv_idx < context_ends[q_idx])
-            # then design the mask for noisy frames
-            # noisy frames will attend to all clean preceeding clean frames + itself
-            C1 = (kv_idx < noise_noise_ends[q_idx]) & (kv_idx >= noise_noise_starts[q_idx])
-            C2 = (kv_idx < noise_context_ends[q_idx]) & (kv_idx >= noise_context_starts[q_idx])
-            noise_mask = (q_idx >= clean_ends) & (C1 | C2)
-
-            eye_mask = q_idx == kv_idx
-            return eye_mask | clean_mask | noise_mask
-
-        block_mask = create_block_mask(
-            attention_mask,
-            B=None,
-            H=None,
-            Q_LEN=total_length + padded_length,
-            KV_LEN=total_length + padded_length,
-            _compile=False,
-            device=device,
-        )
-
-        if DEBUG:
-            print(block_mask)
-            import imageio
-            import numpy as np
-            from torch.nn.attention.flex_attention import create_mask
-
-            mask = create_mask(
-                attention_mask,
-                B=None,
-                H=None,
-                Q_LEN=total_length + padded_length,
-                KV_LEN=total_length + padded_length,
-                device=device,
-            )
-            import cv2
-
-            mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-            imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255.0 * mask))
-
-        return block_mask
-
-    @staticmethod
-    def _prepare_blockwise_causal_attn_mask_i2v(
-        device: torch.device | str,
-        num_frames: int = 21,
-        frame_seqlen: int = 1560,
-        num_frame_per_block=4,
-        local_attn_size=-1,
-    ) -> BlockMask:
-        """
-        we will divide the token sequence into the following format
-        [1 latent frame] [N latent frame] ... [N latent frame]
-        The first frame is separated out to support I2V generation
-        We use flexattention to construct the attention mask
-        """
-        total_length = num_frames * frame_seqlen
-
-        # we do right padding to get to a multiple of 128
-        padded_length = math.ceil(total_length / 128) * 128 - total_length
-
-        ends = torch.zeros(total_length + padded_length, device=device, dtype=torch.long)
-
-        # special handling for the first frame
-        ends[:frame_seqlen] = frame_seqlen
-
-        # Block-wise causal mask will attend to all elements that are before the end of the current chunk
-        frame_indices = torch.arange(
-            start=frame_seqlen,
-            end=total_length,
-            step=frame_seqlen * num_frame_per_block,
-            device=device,
-        )
-
-        for idx, tmp in enumerate(frame_indices):
-            ends[tmp : tmp + frame_seqlen * num_frame_per_block] = (
-                tmp + frame_seqlen * num_frame_per_block
-            )
-
-        def attention_mask(b, h, q_idx, kv_idx):
-            if local_attn_size == -1:
-                return (kv_idx < ends[q_idx]) | (q_idx == kv_idx)
-            else:
-                return (
-                    (kv_idx < ends[q_idx])
-                    & (kv_idx >= (ends[q_idx] - local_attn_size * frame_seqlen))
-                ) | (q_idx == kv_idx)
-
-        block_mask = create_block_mask(
-            attention_mask,
-            B=None,
-            H=None,
-            Q_LEN=total_length + padded_length,
-            KV_LEN=total_length + padded_length,
-            _compile=False,
-            device=device,
-        )
-
-        if not dist.is_initialized() or dist.get_rank() == 0:
-            print(
-                f" cache a block wise causal mask with block size of {num_frame_per_block} frames"
-            )
-            print(block_mask)
-
-        # import imageio
-        # import numpy as np
-        # from torch.nn.attention.flex_attention import create_mask
-
-        # mask = create_mask(attention_mask, B=None, H=None, Q_LEN=total_length +
-        #                    padded_length, KV_LEN=total_length + padded_length, device=device)
-        # import cv2
-        # mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-        # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
-
-        return block_mask
-
     def _forward_inference(
         self,
         x,
         t,
         context,
         seq_len,
-        clip_fea=None,
-        y=None,
-        kv_cache: dict = None,
-        crossattn_cache: dict = None,
-        current_start: int = 0,
-        cache_start: int = 0,
+        kv_cache,
+        crossattn_cache,
+        current_start,
     ):
         r"""
-        Run the diffusion model with kv caching.
-        See Algorithm 2 of CausVid paper https://arxiv.org/abs/2412.07772 for details.
-        This function will be run for num_frame times.
-        Process the latent frames one by one (1560 tokens each)
+        Run the diffusion model with kv caching (block-by-block).
+        See Algorithm 2 of CausVid (https://arxiv.org/abs/2412.07772) for details.
 
         Args:
-            x (List[Tensor]):
-                List of input video tensors, each with shape [C_in, F, H, W]
-            t (Tensor):
-                Diffusion timesteps tensor of shape [B]
-            context (List[Tensor]):
-                List of text embeddings each with shape [L, C]
-            seq_len (`int`):
-                Maximum sequence length for positional encoding
-            clip_fea (Tensor, *optional*):
-                CLIP image features for image-to-video mode
-            y (List[Tensor], *optional*):
-                Conditional video inputs for image-to-video mode, same shape as x
+            x: input video latents, list of tensors with shape [C_in, F, H, W].
+            t: diffusion timesteps, shape [B].
+            context: text embeddings, list of tensors shape [L, C].
+            seq_len: maximum sequence length for positional encoding.
+            kv_cache, crossattn_cache: per-layer cache dicts.
+            current_start: start frame index of the current block in the global stream.
 
         Returns:
-            List[Tensor]:
-                List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
+            Stacked tensor of denoised video latents with shape [B, C_out, F, H / 8, W / 8].
         """
-
-        if self.model_type == "i2v":
-            assert clip_fea is not None and y is not None
         # params
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
-
-        if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
@@ -909,18 +659,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
         x = torch.cat(x)
-        """
-        torch.cat([
-            torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
-                      dim=1) for u in x
-        ])
-        """
 
         # time embeddings
-        # with amp.autocast(dtype=torch.float32):
         e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten()).type_as(x))
         e0 = self.time_projection(e).unflatten(1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
-        # assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # context
         context_lens = None
@@ -929,10 +671,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context]
             )
         )
-
-        if clip_fea is not None:
-            context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
-            context = torch.concat([context_clip, context], dim=1)
 
         # arguments
         kwargs = dict(
@@ -957,7 +695,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     {
                         "kv_cache": kv_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start,
                     }
                 )
                 x = torch.utils.checkpoint.checkpoint(
@@ -972,7 +709,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         "kv_cache": kv_cache[block_index],
                         "crossattn_cache": crossattn_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start,
                     }
                 )
                 x = block(x, **kwargs)
@@ -989,77 +725,33 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         t,
         context,
         seq_len,
-        clean_x=None,
-        aug_t=None,
-        clip_fea=None,
-        y=None,
     ):
         r"""
-        Forward pass through the diffusion model
+        Training forward pass (no kv-cache; uses block-wise causal attention).
 
         Args:
-            x (List[Tensor]):
-                List of input video tensors, each with shape [C_in, F, H, W]
-            t (Tensor):
-                Diffusion timesteps tensor of shape [B]
-            context (List[Tensor]):
-                List of text embeddings each with shape [L, C]
-            seq_len (`int`):
-                Maximum sequence length for positional encoding
-            clip_fea (Tensor, *optional*):
-                CLIP image features for image-to-video mode
-            y (List[Tensor], *optional*):
-                Conditional video inputs for image-to-video mode, same shape as x
+            x: input video latents, list of tensors with shape [C_in, F, H, W].
+            t: diffusion timesteps, shape [B].
+            context: text embeddings, list of tensors shape [L, C].
+            seq_len: maximum sequence length for positional encoding.
 
         Returns:
-            List[Tensor]:
-                List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
+            Stacked tensor of denoised video latents with shape [B, C_out, F, H / 8, W / 8].
         """
-        if self.model_type == "i2v":
-            assert clip_fea is not None and y is not None
         # params
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
 
-        # Construct blockwise causal attn mask
+        # Construct blockwise causal attn mask once and reuse across calls.
         if self.block_mask is None:
-            if clean_x is not None:
-                if self.independent_first_frame:
-                    raise NotImplementedError()
-                else:
-                    self.block_mask = self._prepare_teacher_forcing_mask(
-                        device,
-                        num_frames=x.shape[2],
-                        frame_seqlen=x.shape[-2]
-                        * x.shape[-1]
-                        // (self.patch_size[1] * self.patch_size[2]),
-                        num_frame_per_block=self.num_frame_per_block,
-                    )
-            else:
-                if self.independent_first_frame:
-                    self.block_mask = self._prepare_blockwise_causal_attn_mask_i2v(
-                        device,
-                        num_frames=x.shape[2],
-                        frame_seqlen=x.shape[-2]
-                        * x.shape[-1]
-                        // (self.patch_size[1] * self.patch_size[2]),
-                        num_frame_per_block=self.num_frame_per_block,
-                        local_attn_size=self.local_attn_size,
-                    )
-                else:
-                    self.block_mask = self._prepare_blockwise_causal_attn_mask(
-                        device,
-                        num_frames=x.shape[2],
-                        frame_seqlen=x.shape[-2]
-                        * x.shape[-1]
-                        // (self.patch_size[1] * self.patch_size[2]),
-                        num_frame_per_block=self.num_frame_per_block,
-                        local_attn_size=self.local_attn_size,
-                    )
-
-        if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
+            self.block_mask = self._prepare_blockwise_causal_attn_mask(
+                device,
+                num_frames=x.shape[2],
+                frame_seqlen=x.shape[-2] * x.shape[-1] // (self.patch_size[1] * self.patch_size[2]),
+                num_frame_per_block=self.num_frame_per_block,
+                local_attn_size=self.local_attn_size,
+            )
 
         # embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
@@ -1074,10 +766,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         )
 
         # time embeddings
-        # with amp.autocast(dtype=torch.float32):
         e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten()).type_as(x))
         e0 = self.time_projection(e).unflatten(1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
-        # assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # context
         context_lens = None
@@ -1086,36 +776,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 [torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context]
             )
         )
-
-        if clip_fea is not None:
-            context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
-            context = torch.concat([context_clip, context], dim=1)
-
-        if clean_x is not None:
-            clean_x = [self.patch_embedding(u.unsqueeze(0)) for u in clean_x]
-            clean_x = [u.flatten(2).transpose(1, 2) for u in clean_x]
-
-            seq_lens_clean = torch.tensor([u.size(1) for u in clean_x], dtype=torch.long)
-            assert seq_lens_clean.max() <= seq_len
-            clean_x = torch.cat(
-                [
-                    torch.cat([u, u.new_zeros(1, seq_lens_clean[0] - u.size(1), u.size(2))], dim=1)
-                    for u in clean_x
-                ]
-            )
-
-            x = torch.cat([clean_x, x], dim=1)
-            if aug_t is None:
-                aug_t = torch.zeros_like(t)
-            e_clean = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim, aug_t.flatten()).type_as(x)
-            )
-            e0_clean = (
-                self.time_projection(e_clean)
-                .unflatten(1, (6, self.dim))
-                .unflatten(dim=0, sizes=t.shape)
-            )
-            e0 = torch.cat([e0_clean, e0], dim=1)
 
         # arguments
         kwargs = dict(
@@ -1144,9 +804,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 )
             else:
                 x = block(x, **kwargs)
-
-        if clean_x is not None:
-            x = x[:, x.shape[1] // 2 :]
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))

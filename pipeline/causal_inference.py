@@ -30,7 +30,7 @@ class CausalInferencePipeline(torch.nn.Module):
         self.frame_seq_length = 1560
 
         self.kv_cache1 = None
-        self.args = args
+        self.context_noise = args.context_noise
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
         self.local_attn_size = self.generator.model.local_attn_size
 
@@ -172,7 +172,7 @@ class CausalInferencePipeline(torch.nn.Module):
             )
 
             # Step 3.3: rerun with timestep zero to update KV cache using clean context
-            context_timestep = torch.ones_like(timestep) * self.args.context_noise
+            context_timestep = torch.ones_like(timestep) * self.context_noise
             self.generator(
                 noisy_image_or_video=denoised_pred,
                 conditional_dict=conditional_dict,
