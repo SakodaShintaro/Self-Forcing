@@ -138,19 +138,13 @@ class WanVAEWrapper(torch.nn.Module):
 
 
 class WanDiffusionWrapper(torch.nn.Module):
-    def __init__(
-        self,
-        model_name="Wan2.1-T2V-1.3B",
-        timestep_shift=8.0,
-        local_attn_size=-1,
-        sink_size=0,
-    ):
+    def __init__(self, timestep_shift):
         super().__init__()
 
-        model_dir = snapshot_download(f"Wan-AI/{model_name}")
-        self.model = CausalWanModel.from_pretrained(
-            model_dir, local_attn_size=local_attn_size, sink_size=sink_size
-        )
+        # All callers in this fork target Wan2.1-T2V-1.3B with global causal attention
+        # (no local window, no attention sink), so these are hard-coded.
+        model_dir = snapshot_download(WAN_REPO_ID)
+        self.model = CausalWanModel.from_pretrained(model_dir, local_attn_size=-1, sink_size=0)
         self.model.eval()
 
         self.scheduler = FlowMatchScheduler(

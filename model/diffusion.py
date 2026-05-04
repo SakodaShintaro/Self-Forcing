@@ -9,7 +9,7 @@ from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 class CausalDiffusion(nn.Module):
     def __init__(self, args, device):
         super().__init__()
-        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}))
+        self.generator = WanDiffusionWrapper(**args.model_kwargs)
         self.generator.model.requires_grad_(True)
 
         self.text_encoder = WanTextEncoder()
@@ -24,7 +24,7 @@ class CausalDiffusion(nn.Module):
         self.device = device
         self.dtype = torch.bfloat16 if args.mixed_precision else torch.float32
 
-        self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
+        self.num_frame_per_block = args.num_frame_per_block
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
 

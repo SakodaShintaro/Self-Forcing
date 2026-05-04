@@ -217,7 +217,6 @@ def main() -> None:
     config = OmegaConf.load(args.config_path)
     config.b2d_root = args.b2d_root
     config.denoising_step_list = [1000, 750, 500, 250]
-    config.warp_denoising_step = True
 
     device = torch.device("cuda")
     set_seed(args.seed)
@@ -225,7 +224,7 @@ def main() -> None:
 
     print(f"output dir: {out_dir}")
     print("building pipeline")
-    pipeline = CausalInferencePipeline(config, device=device)
+    pipeline = CausalInferencePipeline(config)
 
     base_ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
     print(f"loading base ckpt: {base_ckpt_path}")
@@ -315,7 +314,6 @@ def main() -> None:
             _, all_lat = pipeline.inference(
                 noise=noise,
                 text_prompts=[fixed_caption],
-                return_latents=True,
                 initial_latent=initial_latent,
             )
             # all_lat: (1, K_lat + pred_lat, 16, 60, 104). Keep only the predicted block.
