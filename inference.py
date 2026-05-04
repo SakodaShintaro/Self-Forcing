@@ -23,8 +23,12 @@ from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import resolve_checkpoint_path, set_seed
 
 
-def annotate_video(video_thwc: torch.Tensor, num_context_pixel_frames: int,
-                   gen_seconds: float, gen_pixel_fps: float) -> torch.Tensor:
+def annotate_video(
+    video_thwc: torch.Tensor,
+    num_context_pixel_frames: int,
+    gen_seconds: float,
+    gen_pixel_fps: float,
+) -> torch.Tensor:
     """Draw 'context'/'generated' label (top-left) and timing info (bottom-left)
     onto each frame of a (T, H, W, C) RGB tensor in [0, 255]."""
     arr = video_thwc.numpy().astype(np.uint8).copy()
@@ -33,14 +37,25 @@ def annotate_video(video_thwc: torch.Tensor, num_context_pixel_frames: int,
     for t in range(T):
         frame = arr[t]
         label = "context" if t < num_context_pixel_frames else "generated"
-        cv2.putText(frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, info, (16, H - 16), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, info, (16, H - 16), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA
+        )
+        cv2.putText(
+            frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA
+        )
+        cv2.putText(
+            frame, info, (16, H - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA
+        )
+        cv2.putText(
+            frame,
+            info,
+            (16, H - 16),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
         arr[t] = frame
     return torch.from_numpy(arr).float()
 
@@ -51,19 +66,28 @@ parser.add_argument("--checkpoint_path", type=str, help="Path to the checkpoint 
 parser.add_argument("--data_path", type=str, help="Path to the dataset")
 parser.add_argument("--extended_prompt_path", type=str, help="Path to the extended prompt")
 parser.add_argument("--output_folder", type=str, help="Output folder")
-parser.add_argument("--num_output_frames", type=int, default=21,
-                    help="Number of overlap frames between sliding windows")
+parser.add_argument(
+    "--num_output_frames",
+    type=int,
+    default=21,
+    help="Number of overlap frames between sliding windows",
+)
 parser.add_argument("--i2v", action="store_true", help="Whether to perform I2V (or T2V by default)")
 parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA parameters")
 parser.add_argument("--seed", type=int, default=0, help="Random seed")
-parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to generate per prompt")
-parser.add_argument("--save_with_index", action="store_true",
-                    help="Whether to save the video using the index or prompt as the filename")
+parser.add_argument(
+    "--num_samples", type=int, default=1, help="Number of samples to generate per prompt"
+)
+parser.add_argument(
+    "--save_with_index",
+    action="store_true",
+    help="Whether to save the video using the index or prompt as the filename",
+)
 args = parser.parse_args()
 
 # Initialize distributed inference
 if "LOCAL_RANK" in os.environ:
-    dist.init_process_group(backend='nccl')
+    dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
@@ -75,7 +99,7 @@ else:
     world_size = 1
     set_seed(args.seed)
 
-print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
+print(f"Free VRAM {get_cuda_free_memory_gb(gpu)} GB")
 low_memory = get_cuda_free_memory_gb(gpu) < 40
 
 torch.set_grad_enabled(False)
@@ -85,7 +109,7 @@ default_config = OmegaConf.load("configs/default_config.yaml")
 config = OmegaConf.merge(default_config, config)
 
 # Initialize pipeline
-if hasattr(config, 'denoising_step_list'):
+if hasattr(config, "denoising_step_list"):
     # Few-step inference
     pipeline = CausalInferencePipeline(config, device=device)
 else:
@@ -95,7 +119,9 @@ else:
 if args.checkpoint_path:
     args.checkpoint_path = resolve_checkpoint_path(args.checkpoint_path)
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
-    pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'])
+    pipeline.generator.load_state_dict(
+        state_dict["generator" if not args.use_ema else "generator_ema"]
+    )
 
 pipeline = pipeline.to(dtype=torch.bfloat16)
 if low_memory:
@@ -109,14 +135,14 @@ pipeline.vae.to(device=gpu)
 # Create dataset
 if args.i2v:
     assert not dist.is_initialized(), "I2V does not support distributed inference yet"
-    transform = transforms.Compose([
-        transforms.Resize((480, 832)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5])
-    ])
+    transform = transforms.Compose(
+        [transforms.Resize((480, 832)), transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
+    )
     dataset = TextImagePairDataset(args.data_path, transform=transform)
 else:
-    dataset = TextDataset(prompt_path=args.data_path, extended_prompt_path=args.extended_prompt_path)
+    dataset = TextDataset(
+        prompt_path=args.data_path, extended_prompt_path=args.extended_prompt_path
+    )
 num_prompts = len(dataset)
 print(f"Number of prompts: {num_prompts}")
 
@@ -136,19 +162,18 @@ if dist.is_initialized():
 
 def encode(self, videos: torch.Tensor) -> torch.Tensor:
     device, dtype = videos[0].device, videos[0].dtype
-    scale = [self.mean.to(device=device, dtype=dtype),
-             1.0 / self.std.to(device=device, dtype=dtype)]
-    output = [
-        self.model.encode(u.unsqueeze(0), scale).float().squeeze(0)
-        for u in videos
+    scale = [
+        self.mean.to(device=device, dtype=dtype),
+        1.0 / self.std.to(device=device, dtype=dtype),
     ]
+    output = [self.model.encode(u.unsqueeze(0), scale).float().squeeze(0) for u in videos]
 
     output = torch.stack(output, dim=0)
     return output
 
 
 for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
-    idx = batch_data['idx'].item()
+    idx = batch_data["idx"].item()
 
     # For DataLoader batch_size=1, the batch_data is already a single item, but in a batch container
     # Unpack the batch data for convenience
@@ -163,23 +188,26 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     if args.i2v:
         # For image-to-video, batch['image'] is (B, C, T, H, W) where T is the
         # number of input pixel frames (1 for plain I2V, multiple for video extension).
-        prompt = batch['prompts'][0]
+        prompt = batch["prompts"][0]
         prompts = [prompt] * args.num_samples
 
-        image = batch['image'].to(device=device, dtype=torch.bfloat16)
+        image = batch["image"].to(device=device, dtype=torch.bfloat16)
 
-        initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=torch.bfloat16)
+        initial_latent = pipeline.vae.encode_to_latent(image).to(
+            device=device, dtype=torch.bfloat16
+        )
         initial_latent = initial_latent.repeat(args.num_samples, 1, 1, 1, 1)
         num_input_latents = initial_latent.shape[1]
 
         sampled_noise = torch.randn(
             [args.num_samples, args.num_output_frames - num_input_latents, 16, 60, 104],
-            device=device, dtype=torch.bfloat16
+            device=device,
+            dtype=torch.bfloat16,
         )
     else:
         # For text-to-video, batch is just the text prompt
-        prompt = batch['prompts'][0]
-        extended_prompt = batch['extended_prompts'][0] if 'extended_prompts' in batch else None
+        prompt = batch["prompts"][0]
+        extended_prompt = batch["extended_prompts"][0] if "extended_prompts" in batch else None
         if extended_prompt is not None:
             prompts = [extended_prompt] * args.num_samples
         else:
@@ -187,7 +215,9 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         initial_latent = None
 
         sampled_noise = torch.randn(
-            [args.num_samples, args.num_output_frames, 16, 60, 104], device=device, dtype=torch.bfloat16
+            [args.num_samples, args.num_output_frames, 16, 60, 104],
+            device=device,
+            dtype=torch.bfloat16,
         )
 
     # Generate frames
@@ -205,7 +235,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         torch.cuda.synchronize()
     gen_seconds = time.perf_counter() - t_start
 
-    current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
+    current_video = rearrange(video, "b t c h w -> b t h w c").cpu()
     all_video.append(current_video)
     num_generated_frames += latents.shape[1]
 
@@ -219,8 +249,11 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         num_context_pixel_frames = 0
     num_generated_pixel_frames = total_pixel_frames - num_context_pixel_frames
     gen_pixel_fps = num_generated_pixel_frames / gen_seconds if gen_seconds > 0 else 0.0
-    gen_latent_fps = (latents.shape[1] - (num_input_latents if args.i2v else 0)) / gen_seconds \
-        if gen_seconds > 0 else 0.0
+    gen_latent_fps = (
+        (latents.shape[1] - (num_input_latents if args.i2v else 0)) / gen_seconds
+        if gen_seconds > 0
+        else 0.0
+    )
     print(
         f"[gen] {gen_seconds:.2f}s | "
         f"{num_generated_pixel_frames} px frames generated | "
@@ -236,9 +269,9 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         for seed_idx in range(args.num_samples):
             # All processes save their videos
             if args.save_with_index:
-                output_path = os.path.join(args.output_folder, f'{idx}-{seed_idx}_{model}.mp4')
+                output_path = os.path.join(args.output_folder, f"{idx}-{seed_idx}_{model}.mp4")
             else:
-                output_path = os.path.join(args.output_folder, f'{prompt[:100]}-{seed_idx}.mp4')
+                output_path = os.path.join(args.output_folder, f"{prompt[:100]}-{seed_idx}.mp4")
             annotated = annotate_video(
                 video[seed_idx],
                 num_context_pixel_frames=num_context_pixel_frames,

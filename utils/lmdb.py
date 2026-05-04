@@ -22,7 +22,7 @@ def store_arrays_to_lmdb(env, arrays_dict, start_index=0):
                 else:
                     row_bytes = row.tobytes()
 
-                data_key = f'{array_name}_{start_index + i}_data'.encode()
+                data_key = f"{array_name}_{start_index + i}_data".encode()
 
                 txn.put(data_key, row_bytes)
 
@@ -47,8 +47,8 @@ def process_data_dict(data_dict, seen_prompts):
 
     all_videos = np.concatenate(all_videos, axis=0)
 
-    output_dict['latents'] = all_videos
-    output_dict['prompts'] = np.array(all_prompts)
+    output_dict["latents"] = all_videos
+    output_dict["prompts"] = np.array(all_prompts)
 
     return output_dict
 
@@ -57,7 +57,7 @@ def retrieve_row_from_lmdb(lmdb_env, array_name, dtype, row_index, shape=None):
     """
     Retrieve a specific row from a specific array in the LMDB.
     """
-    data_key = f'{array_name}_{row_index}_data'.encode()
+    data_key = f"{array_name}_{row_index}_data".encode()
 
     with lmdb_env.begin() as txn:
         row_bytes = txn.get(data_key)

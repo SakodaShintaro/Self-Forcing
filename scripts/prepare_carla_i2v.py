@@ -30,15 +30,28 @@ def fit_letterbox(img: Image.Image, target_w: int, target_h: int) -> Image.Image
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--src", type=Path, required=True, help="CARLA frames directory (PNG sequence)")
+    parser.add_argument(
+        "--src", type=Path, required=True, help="CARLA frames directory (PNG sequence)"
+    )
     parser.add_argument("--dst", type=Path, required=True, help="Output dataset directory")
-    parser.add_argument("--caption", type=str, required=True, help="Caption to associate with the clip")
-    parser.add_argument("--num_frames", type=int, default=1,
-                        help="How many leading frames to include (1 for plain I2V).")
-    parser.add_argument("--start_index", type=int, default=0,
-                        help="Index into the sorted PNG list to start from.")
-    parser.add_argument("--ratio_tag", type=str, default="carla",
-                        help="Aspect-ratio tag used as subfolder name and metadata suffix.")
+    parser.add_argument(
+        "--caption", type=str, required=True, help="Caption to associate with the clip"
+    )
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=1,
+        help="How many leading frames to include (1 for plain I2V).",
+    )
+    parser.add_argument(
+        "--start_index", type=int, default=0, help="Index into the sorted PNG list to start from."
+    )
+    parser.add_argument(
+        "--ratio_tag",
+        type=str,
+        default="carla",
+        help="Aspect-ratio tag used as subfolder name and metadata suffix.",
+    )
     args = parser.parse_args()
 
     image_dir = args.dst / args.ratio_tag
@@ -49,7 +62,9 @@ def main() -> None:
         raise FileNotFoundError(f"No PNG frames found in {args.src}")
     selected = src_frames[args.start_index : args.start_index + args.num_frames]
     if len(selected) < args.num_frames:
-        raise ValueError(f"Need {args.num_frames} frames from index {args.start_index}, got {len(selected)}")
+        raise ValueError(
+            f"Need {args.num_frames} frames from index {args.start_index}, got {len(selected)}"
+        )
 
     file_names = []
     origin_size = None

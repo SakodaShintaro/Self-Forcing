@@ -75,8 +75,8 @@ def _load_state_dict(path: str) -> dict:
             break
     return {
         k.replace("_fsdp_wrapped_module.", "")
-         .replace("_checkpoint_wrapped_module.", "")
-         .replace("_orig_mod.", ""): v
+        .replace("_checkpoint_wrapped_module.", "")
+        .replace("_orig_mod.", ""): v
         for k, v in sd.items()
     }
 
@@ -89,16 +89,15 @@ def _decode_latent_to_uint8(pipeline, latents_thwc: torch.Tensor) -> torch.Tenso
     return (video[0].permute(0, 2, 3, 1).cpu().float() * 255).to(torch.uint8)
 
 
-def _load_real_frames(episode_dir: Path, num_pixel_frames: int,
-                      target_h: int, target_w: int) -> torch.Tensor:
+def _load_real_frames(
+    episode_dir: Path, num_pixel_frames: int, target_h: int, target_w: int
+) -> torch.Tensor:
     """Load and resize the first `num_pixel_frames` raw jpgs from a bench2drive
     episode. Returns (T_pix, H, W, 3) uint8."""
     rgb_dir = episode_dir / "camera" / "rgb_front"
     paths = sorted(rgb_dir.glob("*.jpg"))[:num_pixel_frames]
     if len(paths) < num_pixel_frames:
-        raise RuntimeError(
-            f"Need {num_pixel_frames} jpgs in {rgb_dir}, got {len(paths)}"
-        )
+        raise RuntimeError(f"Need {num_pixel_frames} jpgs in {rgb_dir}, got {len(paths)}")
     resize = transforms.Resize((target_h, target_w))
     frames = []
     for p in paths:
@@ -115,8 +114,8 @@ def _block_frame_index(pixel_idx: int, fpb: int) -> tuple[int, int]:
     first block thus covers (1 + (fpb-1)*4) pixel frames; later blocks cover
     fpb*4 pixel frames each.
     """
-    first_block_pix = 1 + (fpb - 1) * 4   # = 9 when fpb=3
-    later_block_pix = fpb * 4             # = 12 when fpb=3
+    first_block_pix = 1 + (fpb - 1) * 4  # = 9 when fpb=3
+    later_block_pix = fpb * 4  # = 12 when fpb=3
     if pixel_idx < first_block_pix:
         return 0, pixel_idx
     rem = pixel_idx - first_block_pix
@@ -131,8 +130,9 @@ def _per_frame_psnr(pred: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     return 20.0 * torch.log10(255.0 / torch.sqrt(mse))
 
 
-def _annotate(video: torch.Tensor, side: str, fpb: int, K: int,
-              psnrs: torch.Tensor | None) -> torch.Tensor:
+def _annotate(
+    video: torch.Tensor, side: str, fpb: int, K: int, psnrs: torch.Tensor | None
+) -> torch.Tensor:
     """Annotate each frame with block.frame index (and PSNR for the pred side).
 
     side: 'real' or 'pred'. Frames in blocks [0..K-1] on the pred side are
@@ -149,10 +149,12 @@ def _annotate(video: torch.Tensor, side: str, fpb: int, K: int,
         label = f"{tag} B{block} F{f_in_block}"
         if side == "pred" and psnrs is not None:
             label += f"  PSNR {psnrs[t].item():.1f}dB"
-        cv2.putText(arr[t], label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(arr[t], label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(
+            arr[t], label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA
+        )
+        cv2.putText(
+            arr[t], label, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA
+        )
     return torch.from_numpy(arr)
 
 
@@ -165,25 +167,54 @@ def _side_by_side(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, required=True)
-    parser.add_argument("--checkpoint_path", type=str, default=None,
-                        help="Optional LoRA fine-tune ckpt. None = base self_forcing_dmd.pt only.")
-    parser.add_argument("--b2d_root", type=str, required=True,
-                        help="Bench2Drive root (contains splits.json and latents/valid/).")
-    parser.add_argument("--out_root", type=Path, default=None,
-                        help="Output root. Required only when --checkpoint_path is omitted; "
-                             "with a checkpoint, results are saved next to it.")
-    parser.add_argument("--tag", type=str, default="eval",
-                        help="Suffix appended to the timestamped output directory name.")
-    parser.add_argument("--num_episodes", type=int, default=None,
-                        help="Limit to first N valid episodes (default: all).")
-    parser.add_argument("--num_context_blocks", type=int, default=1,
-                        help="K: how many GT blocks to feed as context for each prediction.")
-    parser.add_argument("--num_pred_blocks", type=int, default=6,
-                        help="M: how many sliding predictions to make per episode "
-                             "(K+M total decoded blocks; default 1+6 = 7 blocks = 21 latents).")
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Optional LoRA fine-tune ckpt. None = base self_forcing_dmd.pt only.",
+    )
+    parser.add_argument(
+        "--b2d_root",
+        type=str,
+        required=True,
+        help="Bench2Drive root (contains splits.json and latents/valid/).",
+    )
+    parser.add_argument(
+        "--out_root",
+        type=Path,
+        default=None,
+        help="Output root. Required only when --checkpoint_path is omitted; "
+        "with a checkpoint, results are saved next to it.",
+    )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default="eval",
+        help="Suffix appended to the timestamped output directory name.",
+    )
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=None,
+        help="Limit to first N valid episodes (default: all).",
+    )
+    parser.add_argument(
+        "--num_context_blocks",
+        type=int,
+        default=1,
+        help="K: how many GT blocks to feed as context for each prediction.",
+    )
+    parser.add_argument(
+        "--num_pred_blocks",
+        type=int,
+        default=6,
+        help="M: how many sliding predictions to make per episode "
+        "(K+M total decoded blocks; default 1+6 = 7 blocks = 21 latents).",
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--fps", type=int, default=10,
-                        help="Mp4 playback fps (bench2drive native rate is 10).")
+    parser.add_argument(
+        "--fps", type=int, default=10, help="Mp4 playback fps (bench2drive native rate is 10)."
+    )
     args = parser.parse_args()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -222,6 +253,7 @@ def main() -> None:
     if not (lora_cfg and lora_cfg.get("enabled", False)):
         raise ValueError("This script requires `lora.enabled: true` in the config.")
     from peft import LoraConfig, get_peft_model
+
     pipeline.generator.model.requires_grad_(False)
     peft_cfg = LoraConfig(
         r=int(lora_cfg.rank),
@@ -254,7 +286,7 @@ def main() -> None:
     latent_dir = b2d_root / "latents" / "valid"
     episodes = [ep for ep in splits["valid"] if (latent_dir / f"{ep}.pt").exists()]
     if args.num_episodes is not None:
-        episodes = episodes[:args.num_episodes]
+        episodes = episodes[: args.num_episodes]
     print(f"valid episodes to infer: {len(episodes)}")
 
     K = args.num_context_blocks
@@ -273,7 +305,7 @@ def main() -> None:
         T_lat = latent.shape[0]
         T_blocks = T_lat // fpb
         if T_blocks < K + 1:
-            tqdm.write(f"[{i+1}/{len(episodes)}] {ep}: SKIP (T_blocks={T_blocks} < K+1={K+1})")
+            tqdm.write(f"[{i + 1}/{len(episodes)}] {ep}: SKIP (T_blocks={T_blocks} < K+1={K + 1})")
             continue
         usable_M = min(M, T_blocks - K)
 
@@ -282,17 +314,14 @@ def main() -> None:
         # *ground truth* blocks. KV cache is auto-reset per pipeline.inference().
         t0 = time.time()
         pred_block_latents: list[torch.Tensor] = []
-        block_pbar = tqdm(range(usable_M), desc=f"  blocks ({ep[:30]})",
-                          unit="blk", leave=False)
+        block_pbar = tqdm(range(usable_M), desc=f"  blocks ({ep[:30]})", unit="blk", leave=False)
         for j in block_pbar:
             ctx_start = j * fpb
             ctx_end = ctx_start + K_lat
-            initial_latent = latent[ctx_start:ctx_end].unsqueeze(0).to(
-                device=device, dtype=torch.bfloat16
+            initial_latent = (
+                latent[ctx_start:ctx_end].unsqueeze(0).to(device=device, dtype=torch.bfloat16)
             )  # (1, K_lat, 16, 60, 104)
-            noise = torch.randn(
-                (1, pred_lat, 16, 60, 104), device=device, dtype=torch.bfloat16
-            )
+            noise = torch.randn((1, pred_lat, 16, 60, 104), device=device, dtype=torch.bfloat16)
             _, all_lat = pipeline.inference(
                 noise=noise,
                 text_prompts=[fixed_caption],
@@ -310,12 +339,15 @@ def main() -> None:
         # boundary discontinuity that would arise if we concatenated
         # [GT, pred_1, pred_2, ...] and decoded once.
         ctx_seq = latent[:K_lat].unsqueeze(0).to(device=device, dtype=torch.bfloat16)
-        pix_chunks = [_decode_latent_to_uint8(pipeline, ctx_seq)]   # K context blocks decoded
-        pred_pix_per_block = pred_lat * 4   # last pred_lat latents -> pred_lat*4 pixel frames (each is a "subsequent" latent)
+        pix_chunks = [_decode_latent_to_uint8(pipeline, ctx_seq)]  # K context blocks decoded
+        pred_pix_per_block = (
+            pred_lat * 4
+        )  # last pred_lat latents -> pred_lat*4 pixel frames (each is a "subsequent" latent)
         for j in range(usable_M):
             n_gt_lat = (K + j) * fpb  # GT latents preceding this predicted block
             seq = torch.cat(
-                [latent[:n_gt_lat].unsqueeze(0), pred_block_latents[j]], dim=1,
+                [latent[:n_gt_lat].unsqueeze(0), pred_block_latents[j]],
+                dim=1,
             ).to(device=device, dtype=torch.bfloat16)
             decoded = _decode_latent_to_uint8(pipeline, seq)
             # Keep only the pixel frames corresponding to the predicted block.
@@ -335,7 +367,7 @@ def main() -> None:
         # roundtrip), drops where the model has to predict.
         psnrs = _per_frame_psnr(pred_uint8, real_uint8)
         # Mean PSNR over predicted blocks only (skip the K context blocks).
-        ctx_pix = 1 + (fpb - 1) * 4 + (K - 1) * fpb * 4   # = pixels covered by K context blocks
+        ctx_pix = 1 + (fpb - 1) * 4 + (K - 1) * fpb * 4  # = pixels covered by K context blocks
         pred_only_psnr = float(psnrs[ctx_pix:].mean().item()) if num_pix > ctx_pix else float("nan")
 
         # Per-block mean PSNR (helps diagnose where model errors concentrate).
@@ -358,23 +390,27 @@ def main() -> None:
         running = [s["mean_psnr_predicted_blocks_db"] for s in summary] + [pred_only_psnr]
         running_mean = sum(running) / len(running)
         ep_pbar.set_postfix(
-            ep=ep[:30], psnr=f"{pred_only_psnr:.2f}dB",
-            avg=f"{running_mean:.2f}dB", dt=f"{dt:.1f}s",
+            ep=ep[:30],
+            psnr=f"{pred_only_psnr:.2f}dB",
+            avg=f"{running_mean:.2f}dB",
+            dt=f"{dt:.1f}s",
         )
         tqdm.write(
-            f"[{i+1}/{len(episodes)}] {ep}: T_blocks={T_blocks} K={K} M={usable_M} "
+            f"[{i + 1}/{len(episodes)}] {ep}: T_blocks={T_blocks} K={K} M={usable_M} "
             f"pred_PSNR={pred_only_psnr:.2f}dB dt={dt:.1f}s"
         )
-        summary.append({
-            "episode": ep,
-            "T_blocks": T_blocks,
-            "K": K,
-            "M": usable_M,
-            "mean_psnr_predicted_blocks_db": round(pred_only_psnr, 3),
-            "per_block_psnr_db": per_block_psnr,
-            "per_frame_psnr_db": per_frame_psnr,
-            "dt_seconds": round(dt, 2),
-        })
+        summary.append(
+            {
+                "episode": ep,
+                "T_blocks": T_blocks,
+                "K": K,
+                "M": usable_M,
+                "mean_psnr_predicted_blocks_db": round(pred_only_psnr, 3),
+                "per_block_psnr_db": per_block_psnr,
+                "per_frame_psnr_db": per_frame_psnr,
+                "dt_seconds": round(dt, 2),
+            }
+        )
 
     with open(out_dir / "summary.json", "w") as f:
         json.dump(

@@ -1,20 +1,17 @@
 import gc
 import logging
-
-from utils.dataset import ShardingLMDBDataset, cycle
-from utils.dataset import TextDataset
-from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
-from utils.misc import (
-    set_seed,
-    merge_dict_list
-)
-import torch.distributed as dist
-from omegaconf import OmegaConf
-from model import CausVid, DMD, SiD
-import torch
-import wandb
-import time
 import os
+import time
+
+import torch
+import torch.distributed as dist
+import wandb
+from omegaconf import OmegaConf
+
+from model import DMD, CausVid, SiD
+from utils.dataset import ShardingLMDBDataset, TextDataset, cycle
+from utils.distributed import EMA_FSDP, fsdp_state_dict, fsdp_wrap, launch_distributed_job
+from utils.misc import merge_dict_list, set_seed
 
 
 class Trainer:
@@ -52,7 +49,7 @@ class Trainer:
                 mode="online",
                 entity=config.wandb_entity,
                 project=config.wandb_project,
-                dir=config.wandb_save_dir
+                dir=config.wandb_save_dir,
             )
 
         self.output_path = config.logdir
@@ -74,21 +71,21 @@ class Trainer:
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
+            wrap_strategy=config.generator_fsdp_wrap_strategy,
         )
 
         self.model.real_score = fsdp_wrap(
             self.model.real_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.real_score_fsdp_wrap_strategy
+            wrap_strategy=config.real_score_fsdp_wrap_strategy,
         )
 
         self.model.fake_score = fsdp_wrap(
             self.model.fake_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.fake_score_fsdp_wrap_strategy
+            wrap_strategy=config.fake_score_fsdp_wrap_strategy,
         )
 
         self.model.text_encoder = fsdp_wrap(
@@ -96,27 +93,27 @@ class Trainer:
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
-            cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
+            cpu_offload=getattr(config, "text_encoder_cpu_offload", False),
         )
 
         if not config.no_visualize or config.load_raw_video:
             self.model.vae = self.model.vae.to(
-                device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
+                device=self.device,
+                dtype=torch.bfloat16 if config.mixed_precision else torch.float32,
+            )
 
         self.generator_optimizer = torch.optim.AdamW(
-            [param for param in self.model.generator.parameters()
-             if param.requires_grad],
+            [param for param in self.model.generator.parameters() if param.requires_grad],
             lr=config.lr,
             betas=(config.beta1, config.beta2),
-            weight_decay=config.weight_decay
+            weight_decay=config.weight_decay,
         )
 
         self.critic_optimizer = torch.optim.AdamW(
-            [param for param in self.model.fake_score.parameters()
-             if param.requires_grad],
+            [param for param in self.model.fake_score.parameters() if param.requires_grad],
             lr=config.lr_critic if hasattr(config, "lr_critic") else config.lr,
             betas=(config.beta1_critic, config.beta2_critic),
-            weight_decay=config.weight_decay
+            weight_decay=config.weight_decay,
         )
 
         # Step 3: Initialize the dataloader
@@ -125,12 +122,11 @@ class Trainer:
         else:
             dataset = TextDataset(config.data_path)
         sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, shuffle=True, drop_last=True)
+            dataset, shuffle=True, drop_last=True
+        )
         dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=config.batch_size,
-            sampler=sampler,
-            num_workers=8)
+            dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8
+        )
 
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
@@ -138,8 +134,8 @@ class Trainer:
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
-        rename_param = (
-            lambda name: name.replace("_fsdp_wrapped_module.", "")
+        rename_param = lambda name: (
+            name.replace("_fsdp_wrapped_module.", "")
             .replace("_checkpoint_wrapped_module.", "")
             .replace("_orig_mod.", "")
         )
@@ -165,9 +161,7 @@ class Trainer:
                 state_dict = state_dict["generator"]
             elif "model" in state_dict:
                 state_dict = state_dict["model"]
-            self.model.generator.load_state_dict(
-                state_dict, strict=True
-            )
+            self.model.generator.load_state_dict(state_dict, strict=True)
 
         ##############################################################################################################
 
@@ -181,10 +175,8 @@ class Trainer:
 
     def save(self):
         print("Start gathering distributed model states...")
-        generator_state_dict = fsdp_state_dict(
-            self.model.generator)
-        critic_state_dict = fsdp_state_dict(
-            self.model.fake_score)
+        generator_state_dict = fsdp_state_dict(self.model.generator)
+        critic_state_dict = fsdp_state_dict(self.model.fake_score)
 
         if self.config.ema_start_step < self.step:
             state_dict = {
@@ -199,12 +191,17 @@ class Trainer:
             }
 
         if self.is_main_process:
-            os.makedirs(os.path.join(self.output_path,
-                        f"checkpoint_model_{self.step:06d}"), exist_ok=True)
-            torch.save(state_dict, os.path.join(self.output_path,
-                       f"checkpoint_model_{self.step:06d}", "model.pt"))
-            print("Model saved to", os.path.join(self.output_path,
-                  f"checkpoint_model_{self.step:06d}", "model.pt"))
+            os.makedirs(
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}"), exist_ok=True
+            )
+            torch.save(
+                state_dict,
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
+            )
+            print(
+                "Model saved to",
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
+            )
 
     def fwdbwd_one_step(self, batch, train_generator):
         self.model.eval()  # prevent any randomness (e.g. dropout)
@@ -216,8 +213,10 @@ class Trainer:
         text_prompts = batch["prompts"]
         if self.config.i2v:
             clean_latent = None
-            image_latent = batch["ode_latent"][:, -1][:, 0:1, ].to(
-                device=self.device, dtype=self.dtype)
+            image_latent = batch["ode_latent"][:, -1][
+                :,
+                0:1,
+            ].to(device=self.device, dtype=self.dtype)
         else:
             clean_latent = None
             image_latent = None
@@ -228,14 +227,13 @@ class Trainer:
 
         # Step 2: Extract the conditional infos
         with torch.no_grad():
-            conditional_dict = self.model.text_encoder(
-                text_prompts=text_prompts)
+            conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
 
             if not getattr(self, "unconditional_dict", None):
                 unconditional_dict = self.model.text_encoder(
-                    text_prompts=[self.config.negative_prompt] * batch_size)
-                unconditional_dict = {k: v.detach()
-                                      for k, v in unconditional_dict.items()}
+                    text_prompts=[self.config.negative_prompt] * batch_size
+                )
+                unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
                 self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
             else:
                 unconditional_dict = self.unconditional_dict
@@ -247,15 +245,15 @@ class Trainer:
                 conditional_dict=conditional_dict,
                 unconditional_dict=unconditional_dict,
                 clean_latent=clean_latent,
-                initial_latent=image_latent if self.config.i2v else None
+                initial_latent=image_latent if self.config.i2v else None,
             )
 
             generator_loss.backward()
-            generator_grad_norm = self.model.generator.clip_grad_norm_(
-                self.max_grad_norm_generator)
+            generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
 
-            generator_log_dict.update({"generator_loss": generator_loss,
-                                       "generator_grad_norm": generator_grad_norm})
+            generator_log_dict.update(
+                {"generator_loss": generator_loss, "generator_grad_norm": generator_grad_norm}
+            )
 
             return generator_log_dict
         else:
@@ -267,44 +265,46 @@ class Trainer:
             conditional_dict=conditional_dict,
             unconditional_dict=unconditional_dict,
             clean_latent=clean_latent,
-            initial_latent=image_latent if self.config.i2v else None
+            initial_latent=image_latent if self.config.i2v else None,
         )
 
         critic_loss.backward()
-        critic_grad_norm = self.model.fake_score.clip_grad_norm_(
-            self.max_grad_norm_critic)
+        critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
 
-        critic_log_dict.update({"critic_loss": critic_loss,
-                                "critic_grad_norm": critic_grad_norm})
+        critic_log_dict.update({"critic_loss": critic_loss, "critic_grad_norm": critic_grad_norm})
 
         return critic_log_dict
 
     def generate_video(self, pipeline, prompts, image=None):
         batch_size = len(prompts)
         if image is not None:
-            image = image.squeeze(0).unsqueeze(0).unsqueeze(2).to(device="cuda", dtype=torch.bfloat16)
+            image = (
+                image.squeeze(0).unsqueeze(0).unsqueeze(2).to(device="cuda", dtype=torch.bfloat16)
+            )
 
             # Encode the input image as the first latent
-            initial_latent = pipeline.vae.encode_to_latent(image).to(device="cuda", dtype=torch.bfloat16)
+            initial_latent = pipeline.vae.encode_to_latent(image).to(
+                device="cuda", dtype=torch.bfloat16
+            )
             initial_latent = initial_latent.repeat(batch_size, 1, 1, 1, 1)
             sampled_noise = torch.randn(
                 [batch_size, self.model.num_training_frames - 1, 16, 60, 104],
                 device="cuda",
-                dtype=self.dtype
+                dtype=self.dtype,
             )
         else:
             initial_latent = None
             sampled_noise = torch.randn(
                 [batch_size, self.model.num_training_frames, 16, 60, 104],
                 device="cuda",
-                dtype=self.dtype
+                dtype=self.dtype,
             )
 
         video, _ = pipeline.inference(
             noise=sampled_noise,
             text_prompts=prompts,
             return_latents=True,
-            initial_latent=initial_latent
+            initial_latent=initial_latent,
         )
         current_video = video.permute(0, 1, 3, 4, 2).cpu().numpy() * 255.0
         return current_video
@@ -340,12 +340,19 @@ class Trainer:
             self.step += 1
 
             # Create EMA params (if not already created)
-            if (self.step >= self.config.ema_start_step) and \
-                    (self.generator_ema is None) and (self.config.ema_weight > 0):
+            if (
+                (self.step >= self.config.ema_start_step)
+                and (self.generator_ema is None)
+                and (self.config.ema_weight > 0)
+            ):
                 self.generator_ema = EMA_FSDP(self.model.generator, decay=self.config.ema_weight)
 
             # Save the model
-            if (not self.config.no_save) and (self.step - start_step) > 0 and self.step % self.config.log_iters == 0:
+            if (
+                (not self.config.no_save)
+                and (self.step - start_step) > 0
+                and self.step % self.config.log_iters == 0
+            ):
                 torch.cuda.empty_cache()
                 self.save()
                 torch.cuda.empty_cache()
@@ -357,15 +364,19 @@ class Trainer:
                     wandb_loss_dict.update(
                         {
                             "generator_loss": generator_log_dict["generator_loss"].mean().item(),
-                            "generator_grad_norm": generator_log_dict["generator_grad_norm"].mean().item(),
-                            "dmdtrain_gradient_norm": generator_log_dict["dmdtrain_gradient_norm"].mean().item()
+                            "generator_grad_norm": generator_log_dict["generator_grad_norm"]
+                            .mean()
+                            .item(),
+                            "dmdtrain_gradient_norm": generator_log_dict["dmdtrain_gradient_norm"]
+                            .mean()
+                            .item(),
                         }
                     )
 
                 wandb_loss_dict.update(
                     {
                         "critic_loss": critic_log_dict["critic_loss"].mean().item(),
-                        "critic_grad_norm": critic_log_dict["critic_grad_norm"].mean().item()
+                        "critic_grad_norm": critic_log_dict["critic_grad_norm"].mean().item(),
                     }
                 )
 
@@ -384,5 +395,8 @@ class Trainer:
                     self.previous_time = current_time
                 else:
                     if not self.disable_wandb:
-                        wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
+                        wandb.log(
+                            {"per iteration time": current_time - self.previous_time},
+                            step=self.step,
+                        )
                     self.previous_time = current_time

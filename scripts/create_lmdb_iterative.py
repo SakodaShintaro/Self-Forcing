@@ -1,12 +1,13 @@
-from tqdm import tqdm
-import numpy as np
 import argparse
-import torch
-import lmdb
 import glob
 import os
 
-from utils.lmdb import store_arrays_to_lmdb, process_data_dict
+import lmdb
+import numpy as np
+import torch
+from tqdm import tqdm
+
+from utils.lmdb import process_data_dict, store_arrays_to_lmdb
 
 
 def main():
@@ -16,10 +17,8 @@ def main():
     video's ODE trajectories.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str,
-                        required=True, help="path to ode pairs")
-    parser.add_argument("--lmdb_path", type=str,
-                        required=True, help="path to lmdb")
+    parser.add_argument("--data_path", type=str, required=True, help="path to ode pairs")
+    parser.add_argument("--lmdb_path", type=str, required=True, help="path to lmdb")
 
     args = parser.parse_args()
 
@@ -42,7 +41,7 @@ def main():
 
         # write to lmdb file
         store_arrays_to_lmdb(env, data_dict, start_index=counter)
-        counter += len(data_dict['prompts'])
+        counter += len(data_dict["prompts"])
 
     # save each entry's shape to lmdb
     with env.begin(write=True) as txn:

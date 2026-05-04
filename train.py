@@ -26,15 +26,27 @@ def main():
     parser.add_argument("--config_path", type=str, required=True)
     parser.add_argument("--no_save", action="store_true")
     parser.add_argument("--no_visualize", action="store_true")
-    parser.add_argument("--root_dir", type=str, default=None,
-                        help="If set, create {root_dir}/{stamp}_{config_name}/ and use it for "
-                             "checkpoints, wandb files, and a tee'd train.log.")
-    parser.add_argument("--logdir", type=str, default="",
-                        help="Explicit log/checkpoint dir (advanced; use --root-dir instead).")
+    parser.add_argument(
+        "--root_dir",
+        type=str,
+        default=None,
+        help="If set, create {root_dir}/{stamp}_{config_name}/ and use it for "
+        "checkpoints, wandb files, and a tee'd train.log.",
+    )
+    parser.add_argument(
+        "--logdir",
+        type=str,
+        default="",
+        help="Explicit log/checkpoint dir (advanced; use --root-dir instead).",
+    )
     parser.add_argument("--disable_wandb", action="store_true")
-    parser.add_argument("--b2d_root", type=str, default=None,
-                        help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
-                             "Required when dataset_type=b2d_latent; overrides config.b2d_root if both are set.")
+    parser.add_argument(
+        "--b2d_root",
+        type=str,
+        default=None,
+        help="Bench2Drive root directory (contains splits.json and latents/{train,valid}/). "
+        "Required when dataset_type=b2d_latent; overrides config.b2d_root if both are set.",
+    )
 
     args = parser.parse_args()
 
@@ -58,10 +70,10 @@ def main():
 
     if args.b2d_root is not None:
         config.b2d_root = args.b2d_root
-    if getattr(config, "dataset_type", None) == "b2d_latent" and not getattr(config, "b2d_root", None):
-        parser.error(
-            "dataset_type=b2d_latent requires --b2d_root (or config.b2d_root) to be set."
-        )
+    if getattr(config, "dataset_type", None) == "b2d_latent" and not getattr(
+        config, "b2d_root", None
+    ):
+        parser.error("dataset_type=b2d_latent requires --b2d_root (or config.b2d_root) to be set.")
 
     # get the filename of config_path
     config_name = os.path.basename(args.config_path).split(".")[0]

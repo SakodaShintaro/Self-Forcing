@@ -78,8 +78,8 @@ class Trainer:
                 state_dict = state_dict["model"]
             cleaned = {
                 k.replace("_fsdp_wrapped_module.", "")
-                 .replace("_checkpoint_wrapped_module.", "")
-                 .replace("_orig_mod.", ""): v
+                .replace("_checkpoint_wrapped_module.", "")
+                .replace("_orig_mod.", ""): v
                 for k, v in state_dict.items()
             }
             self.model.generator.load_state_dict(cleaned, strict=True)
@@ -88,10 +88,9 @@ class Trainer:
         # This trainer is LoRA-only -- config must define a `lora` block.
         lora_cfg = getattr(config, "lora", None)
         if not (lora_cfg and lora_cfg.get("enabled", False)):
-            raise ValueError(
-                "DiffusionTrainer requires `lora.enabled: true` in the config."
-            )
+            raise ValueError("DiffusionTrainer requires `lora.enabled: true` in the config.")
         from peft import LoraConfig, get_peft_model
+
         self.model.generator.model.requires_grad_(False)
         peft_cfg = LoraConfig(
             r=int(lora_cfg.rank),
@@ -109,7 +108,7 @@ class Trainer:
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
+            wrap_strategy=config.generator_fsdp_wrap_strategy,
         )
 
         self.model.text_encoder = fsdp_wrap(
@@ -122,14 +121,15 @@ class Trainer:
 
         if not config.no_visualize or config.load_raw_video:
             self.model.vae = self.model.vae.to(
-                device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
+                device=self.device,
+                dtype=torch.bfloat16 if config.mixed_precision else torch.float32,
+            )
 
         self.generator_optimizer = torch.optim.AdamW(
-            [param for param in self.model.generator.parameters()
-             if param.requires_grad],
+            [param for param in self.model.generator.parameters() if param.requires_grad],
             lr=config.lr,
             betas=(config.beta1, config.beta2),
-            weight_decay=config.weight_decay
+            weight_decay=config.weight_decay,
         )
 
         # Step 3: Initialize the dataloader
@@ -144,12 +144,11 @@ class Trainer:
         else:
             dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
         sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, shuffle=True, drop_last=True)
+            dataset, shuffle=True, drop_last=True
+        )
         dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=config.batch_size,
-            sampler=sampler,
-            num_workers=8)
+            dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8
+        )
 
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
@@ -160,11 +159,7 @@ class Trainer:
         self.valid_iters = int(getattr(config, "valid_iters", 0) or 0)
         self.valid_batches = int(getattr(config, "valid_batches", 0) or 0)
         self.valid_dataloader = None
-        if (
-            dataset_type == "b2d_latent"
-            and self.valid_iters > 0
-            and self.valid_batches > 0
-        ):
+        if dataset_type == "b2d_latent" and self.valid_iters > 0 and self.valid_batches > 0:
             valid_dataset = Bench2DriveLatentDataset(
                 b2d_root=config.b2d_root,
                 split="valid",
@@ -188,8 +183,8 @@ class Trainer:
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
-        rename_param = (
-            lambda name: name.replace("_fsdp_wrapped_module.", "")
+        rename_param = lambda name: (
+            name.replace("_fsdp_wrapped_module.", "")
             .replace("_checkpoint_wrapped_module.", "")
             .replace("_orig_mod.", "")
         )
@@ -223,13 +218,15 @@ class Trainer:
         # Match by canonical (renamed) name to be robust to FSDP / checkpoint /
         # torch.compile wrapper prefixes.
         def _rename(k: str) -> str:
-            return (k.replace("_fsdp_wrapped_module.", "")
-                     .replace("_checkpoint_wrapped_module.", "")
-                     .replace("_orig_mod.", ""))
+            return (
+                k.replace("_fsdp_wrapped_module.", "")
+                .replace("_checkpoint_wrapped_module.", "")
+                .replace("_orig_mod.", "")
+            )
+
         trainable_renamed = set(self.name_to_trainable_params.keys())
         generator_state_dict = {
-            k: v for k, v in generator_state_dict.items()
-            if _rename(k) in trainable_renamed
+            k: v for k, v in generator_state_dict.items() if _rename(k) in trainable_renamed
         }
 
         state_dict = {"generator": generator_state_dict}
@@ -237,12 +234,17 @@ class Trainer:
             state_dict["generator_ema"] = self.generator_ema.state_dict()
 
         if self.is_main_process:
-            os.makedirs(os.path.join(self.output_path,
-                        f"checkpoint_model_{self.step:06d}"), exist_ok=True)
-            torch.save(state_dict, os.path.join(self.output_path,
-                       f"checkpoint_model_{self.step:06d}", "model.pt"))
-            print("Model saved to", os.path.join(self.output_path,
-                  f"checkpoint_model_{self.step:06d}", "model.pt"))
+            os.makedirs(
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}"), exist_ok=True
+            )
+            torch.save(
+                state_dict,
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
+            )
+            print(
+                "Model saved to",
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
+            )
 
     def train_one_step(self, batch):
         self.log_iters = 1
@@ -253,15 +255,17 @@ class Trainer:
         # Step 1: Get the next batch of text prompts
         text_prompts = batch["prompts"]
         if not self.config.load_raw_video:  # precomputed latent
-            clean_latent = batch["ode_latent"][:, -1].to(
-                device=self.device, dtype=self.dtype)
+            clean_latent = batch["ode_latent"][:, -1].to(device=self.device, dtype=self.dtype)
         else:  # encode raw video to latent
-            frames = batch["frames"].to(
-                device=self.device, dtype=self.dtype)
+            frames = batch["frames"].to(device=self.device, dtype=self.dtype)
             with torch.no_grad():
-                clean_latent = self.model.vae.encode_to_latent(
-                    frames).to(device=self.device, dtype=self.dtype)
-        image_latent = clean_latent[:, 0:1, ]
+                clean_latent = self.model.vae.encode_to_latent(frames).to(
+                    device=self.device, dtype=self.dtype
+                )
+        image_latent = clean_latent[
+            :,
+            0:1,
+        ]
 
         batch_size = len(text_prompts)
         image_or_video_shape = list(self.config.image_or_video_shape)
@@ -269,14 +273,13 @@ class Trainer:
 
         # Step 2: Extract the conditional infos
         with torch.no_grad():
-            conditional_dict = self.model.text_encoder(
-                text_prompts=text_prompts)
+            conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
 
             if not getattr(self, "unconditional_dict", None):
                 unconditional_dict = self.model.text_encoder(
-                    text_prompts=[self.config.negative_prompt] * batch_size)
-                unconditional_dict = {k: v.detach()
-                                      for k, v in unconditional_dict.items()}
+                    text_prompts=[self.config.negative_prompt] * batch_size
+                )
+                unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
                 self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
             else:
                 unconditional_dict = self.unconditional_dict
@@ -287,12 +290,11 @@ class Trainer:
             conditional_dict=conditional_dict,
             unconditional_dict=unconditional_dict,
             clean_latent=clean_latent,
-            initial_latent=image_latent
+            initial_latent=image_latent,
         )
         self.generator_optimizer.zero_grad()
         generator_loss.backward()
-        generator_grad_norm = self.model.generator.clip_grad_norm_(
-            self.max_grad_norm)
+        generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
         self.generator_optimizer.step()
 
         # Increment the step since we finished gradient update
@@ -331,8 +333,8 @@ class Trainer:
                         flush=True,
                     )
                 self.generator_ema = EMA_FSDP(
-                self.model.generator, decay=ema_weight, trainable_only=True
-            )
+                    self.model.generator, decay=ema_weight, trainable_only=True
+                )
             else:
                 self.generator_ema.update(self.model.generator)
 
@@ -358,9 +360,11 @@ class Trainer:
                 if i >= self.valid_batches:
                     break
                 text_prompts = batch["prompts"]
-                clean_latent = batch["ode_latent"][:, -1].to(
-                    device=self.device, dtype=self.dtype)
-                image_latent = clean_latent[:, 0:1, ]
+                clean_latent = batch["ode_latent"][:, -1].to(device=self.device, dtype=self.dtype)
+                image_latent = clean_latent[
+                    :,
+                    0:1,
+                ]
                 batch_size = len(text_prompts)
                 shape = list(image_or_video_shape)
                 shape[0] = batch_size
@@ -369,10 +373,9 @@ class Trainer:
                 unconditional_dict = getattr(self, "unconditional_dict", None)
                 if unconditional_dict is None:
                     unconditional_dict = self.model.text_encoder(
-                        text_prompts=[self.config.negative_prompt] * batch_size)
-                    unconditional_dict = {
-                        k: v.detach() for k, v in unconditional_dict.items()
-                    }
+                        text_prompts=[self.config.negative_prompt] * batch_size
+                    )
+                    unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
                     self.unconditional_dict = unconditional_dict
 
                 loss, _ = self.model.generator_loss(
@@ -388,11 +391,10 @@ class Trainer:
             torch.cuda.set_rng_state(cuda_rng, self.device)
             self.model.generator.train()
 
-        local_count = torch.tensor(
-            [float(len(losses))], device=self.device, dtype=torch.float32
-        )
+        local_count = torch.tensor([float(len(losses))], device=self.device, dtype=torch.float32)
         local_sum = (
-            torch.stack(losses).sum() if losses
+            torch.stack(losses).sum()
+            if losses
             else torch.zeros((), device=self.device, dtype=torch.float32)
         )
         local_sum = local_sum.float().reshape(1)
@@ -406,13 +408,9 @@ class Trainer:
 
     def generate_video(self, pipeline, prompts, image=None):
         batch_size = len(prompts)
-        sampled_noise = torch.randn(
-            [batch_size, 21, 16, 60, 104], device="cuda", dtype=self.dtype
-        )
+        sampled_noise = torch.randn([batch_size, 21, 16, 60, 104], device="cuda", dtype=self.dtype)
         video, _ = pipeline.inference(
-            noise=sampled_noise,
-            text_prompts=prompts,
-            return_latents=True
+            noise=sampled_noise, text_prompts=prompts, return_latents=True
         )
         current_video = video.permute(0, 1, 3, 4, 2).cpu().numpy() * 255.0
         return current_video
@@ -427,10 +425,7 @@ class Trainer:
                 self.save()
                 torch.cuda.empty_cache()
 
-            if (
-                self.valid_dataloader is not None
-                and self.step % self.valid_iters == 0
-            ):
+            if self.valid_dataloader is not None and self.step % self.valid_iters == 0:
                 torch.cuda.empty_cache()
                 val_loss = self.validate()
                 torch.cuda.empty_cache()
@@ -448,7 +443,10 @@ class Trainer:
                     self.previous_time = current_time
                 else:
                     if not self.disable_wandb:
-                        wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
+                        wandb.log(
+                            {"per iteration time": current_time - self.previous_time},
+                            step=self.step,
+                        )
                     self.previous_time = current_time
         # Always save the final checkpoint at exit if we ran to a hard step cap.
         if max_steps is not None and not self.config.no_save:

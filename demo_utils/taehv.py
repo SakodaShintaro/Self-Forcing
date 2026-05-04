@@ -3,11 +3,13 @@
 Tiny AutoEncoder for Hunyuan Video
 (DNN for encoding / decoding videos to Hunyuan Video's latent space)
 """
+
+from collections import namedtuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
-from collections import namedtuple
 
 DecoderResult = namedtuple("DecoderResult", ("frame", "memory"))
 TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))
@@ -25,8 +27,13 @@ class Clamp(nn.Module):
 class MemBlock(nn.Module):
     def __init__(self, n_in, n_out):
         super().__init__()
-        self.conv = nn.Sequential(conv(n_in * 2, n_out), nn.ReLU(inplace=True),
-                                  conv(n_out, n_out), nn.ReLU(inplace=True), conv(n_out, n_out))
+        self.conv = nn.Sequential(
+            conv(n_in * 2, n_out),
+            nn.ReLU(inplace=True),
+            conv(n_out, n_out),
+            nn.ReLU(inplace=True),
+            conv(n_out, n_out),
+        )
         self.skip = nn.Conv2d(n_in, n_out, 1, bias=False) if n_in != n_out else nn.Identity()
         self.act = nn.ReLU(inplace=True)
 
@@ -93,7 +100,9 @@ def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
         # iterate over input timesteps and also iterate over blocks.
         # because of the cursed TPool/TGrow blocks, this is not a nested loop,
         # it's actually a ***graph traversal*** problem! so let's make a queue
-        work_queue = [TWorkItem(xt, 0) for t, xt in enumerate(x.reshape(N, T * C, H, W).chunk(T, dim=1))]
+        work_queue = [
+            TWorkItem(xt, 0) for t, xt in enumerate(x.reshape(N, T * C, H, W).chunk(T, dim=1))
+        ]
         # in addition to manually managing our queue, we also need to manually manage our progressbar.
         # we'll update it for every source node that we consume.
         progress_bar = tqdm(range(T), disable=not show_progress_bar)
@@ -117,7 +126,9 @@ def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
                         mem[i] = xt
                     else:
                         xt_new = b(xt, mem[i])
-                        mem[i].copy_(xt)  # inplace might reduce mysterious pytorch memory allocations? doesn't help though
+                        mem[i].copy_(
+                            xt
+                        )  # inplace might reduce mysterious pytorch memory allocations? doesn't help though
                     # add successor to work queue
                     work_queue.insert(0, TWorkItem(xt_new, i + 1))
                 elif isinstance(b, TPool):
@@ -160,7 +171,12 @@ class TAEHV(nn.Module):
     latent_channels = 16
     image_channels = 3
 
-    def __init__(self, checkpoint_path="taehv.pth", decoder_time_upscale=(True, True), decoder_space_upscale=(True, True, True)):
+    def __init__(
+        self,
+        checkpoint_path="taehv.pth",
+        decoder_time_upscale=(True, True),
+        decoder_space_upscale=(True, True, True),
+    ):
         """Initialize pretrained TAEHV from the given checkpoint.
 
         Arg:
@@ -170,27 +186,58 @@ class TAEHV(nn.Module):
         """
         super().__init__()
         self.encoder = nn.Sequential(
-            conv(TAEHV.image_channels, 64), nn.ReLU(inplace=True),
-            TPool(64, 2), conv(64, 64, stride=2, bias=False), MemBlock(64, 64), MemBlock(64, 64), MemBlock(64, 64),
-            TPool(64, 2), conv(64, 64, stride=2, bias=False), MemBlock(64, 64), MemBlock(64, 64), MemBlock(64, 64),
-            TPool(64, 1), conv(64, 64, stride=2, bias=False), MemBlock(64, 64), MemBlock(64, 64), MemBlock(64, 64),
+            conv(TAEHV.image_channels, 64),
+            nn.ReLU(inplace=True),
+            TPool(64, 2),
+            conv(64, 64, stride=2, bias=False),
+            MemBlock(64, 64),
+            MemBlock(64, 64),
+            MemBlock(64, 64),
+            TPool(64, 2),
+            conv(64, 64, stride=2, bias=False),
+            MemBlock(64, 64),
+            MemBlock(64, 64),
+            MemBlock(64, 64),
+            TPool(64, 1),
+            conv(64, 64, stride=2, bias=False),
+            MemBlock(64, 64),
+            MemBlock(64, 64),
+            MemBlock(64, 64),
             conv(64, TAEHV.latent_channels),
         )
         n_f = [256, 128, 64, 64]
-        self.frames_to_trim = 2**sum(decoder_time_upscale) - 1
+        self.frames_to_trim = 2 ** sum(decoder_time_upscale) - 1
         self.decoder = nn.Sequential(
-            Clamp(), conv(TAEHV.latent_channels, n_f[0]), nn.ReLU(inplace=True),
-            MemBlock(n_f[0], n_f[0]), MemBlock(n_f[0], n_f[0]), MemBlock(n_f[0], n_f[0]), nn.Upsample(
-                scale_factor=2 if decoder_space_upscale[0] else 1), TGrow(n_f[0], 1), conv(n_f[0], n_f[1], bias=False),
-            MemBlock(n_f[1], n_f[1]), MemBlock(n_f[1], n_f[1]), MemBlock(n_f[1], n_f[1]), nn.Upsample(
-                scale_factor=2 if decoder_space_upscale[1] else 1), TGrow(n_f[1], 2 if decoder_time_upscale[0] else 1), conv(n_f[1], n_f[2], bias=False),
-            MemBlock(n_f[2], n_f[2]), MemBlock(n_f[2], n_f[2]), MemBlock(n_f[2], n_f[2]), nn.Upsample(
-                scale_factor=2 if decoder_space_upscale[2] else 1), TGrow(n_f[2], 2 if decoder_time_upscale[1] else 1), conv(n_f[2], n_f[3], bias=False),
-            nn.ReLU(inplace=True), conv(n_f[3], TAEHV.image_channels),
+            Clamp(),
+            conv(TAEHV.latent_channels, n_f[0]),
+            nn.ReLU(inplace=True),
+            MemBlock(n_f[0], n_f[0]),
+            MemBlock(n_f[0], n_f[0]),
+            MemBlock(n_f[0], n_f[0]),
+            nn.Upsample(scale_factor=2 if decoder_space_upscale[0] else 1),
+            TGrow(n_f[0], 1),
+            conv(n_f[0], n_f[1], bias=False),
+            MemBlock(n_f[1], n_f[1]),
+            MemBlock(n_f[1], n_f[1]),
+            MemBlock(n_f[1], n_f[1]),
+            nn.Upsample(scale_factor=2 if decoder_space_upscale[1] else 1),
+            TGrow(n_f[1], 2 if decoder_time_upscale[0] else 1),
+            conv(n_f[1], n_f[2], bias=False),
+            MemBlock(n_f[2], n_f[2]),
+            MemBlock(n_f[2], n_f[2]),
+            MemBlock(n_f[2], n_f[2]),
+            nn.Upsample(scale_factor=2 if decoder_space_upscale[2] else 1),
+            TGrow(n_f[2], 2 if decoder_time_upscale[1] else 1),
+            conv(n_f[2], n_f[3], bias=False),
+            nn.ReLU(inplace=True),
+            conv(n_f[3], TAEHV.image_channels),
         )
         if checkpoint_path is not None:
-            self.load_state_dict(self.patch_tgrow_layers(torch.load(
-                checkpoint_path, map_location="cpu", weights_only=True)))
+            self.load_state_dict(
+                self.patch_tgrow_layers(
+                    torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                )
+            )
 
     def patch_tgrow_layers(self, sd):
         """Patch TGrow layers to use a smaller kernel if needed.
@@ -204,7 +251,7 @@ class TAEHV(nn.Module):
                 key = f"decoder.{i}.conv.weight"
                 if sd[key].shape[0] > new_sd[key].shape[0]:
                     # take the last-timestep output channels
-                    sd[key] = sd[key][-new_sd[key].shape[0]:]
+                    sd[key] = sd[key][-new_sd[key].shape[0] :]
         return sd
 
     def encode_video(self, x, parallel=True, show_progress_bar=True):
@@ -242,6 +289,7 @@ def main():
     """Run TAEHV roundtrip reconstruction on the given video paths."""
     import os
     import sys
+
     import cv2  # no highly esteemed deed is commemorated here
 
     class VideoTensorReader:
@@ -258,28 +306,40 @@ def main():
             if not ret:
                 self.cap.release()
                 raise StopIteration  # End of video or error
-            return torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)  # BGR HWC -> RGB CHW
+            return torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(
+                2, 0, 1
+            )  # BGR HWC -> RGB CHW
 
     class VideoTensorWriter:
         def __init__(self, video_file_path, width_height, fps=30):
-            self.writer = cv2.VideoWriter(video_file_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, width_height)
+            self.writer = cv2.VideoWriter(
+                video_file_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, width_height
+            )
             assert self.writer.isOpened(), f"Could not create writer for {video_file_path}"
 
         def write(self, frame_tensor):
             assert frame_tensor.ndim == 3 and frame_tensor.shape[0] == 3, f"{frame_tensor.shape}??"
-            self.writer.write(cv2.cvtColor(frame_tensor.permute(1, 2, 0).numpy(),
-                              cv2.COLOR_RGB2BGR))  # RGB CHW -> BGR HWC
+            self.writer.write(
+                cv2.cvtColor(frame_tensor.permute(1, 2, 0).numpy(), cv2.COLOR_RGB2BGR)
+            )  # RGB CHW -> BGR HWC
 
         def __del__(self):
-            if hasattr(self, 'writer'):
+            if hasattr(self, "writer"):
                 self.writer.release()
 
-    dev = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    dev = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
     dtype = torch.float16
     checkpoint_path = os.getenv("TAEHV_CHECKPOINT_PATH", "taehv.pth")
     checkpoint_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
     print(
-        f"Using device \033[31m{dev}\033[0m, dtype \033[32m{dtype}\033[0m, checkpoint \033[34m{checkpoint_name}\033[0m ({checkpoint_path})")
+        f"Using device \033[31m{dev}\033[0m, dtype \033[32m{dtype}\033[0m, checkpoint \033[34m{checkpoint_name}\033[0m ({checkpoint_path})"
+    )
     taehv = TAEHV(checkpoint_path=checkpoint_path).to(dev, dtype)
     for video_path in sys.argv[1:]:
         print(f"Processing {video_path}...")
@@ -303,7 +363,8 @@ def main():
             print(f"  Decoded {video_path} -> {vid_dec.shape}")
         video_out_path = video_path + f".reconstructed_by_{checkpoint_name}.mp4"
         video_out = VideoTensorWriter(
-            video_out_path, (vid_dec.shape[-1], vid_dec.shape[-2]), fps=int(round(video_in.fps)))
+            video_out_path, (vid_dec.shape[-1], vid_dec.shape[-2]), fps=int(round(video_in.fps))
+        )
         for frame in vid_dec.clamp_(0, 1).mul_(255).round_().byte().cpu()[0]:
             video_out.write(frame)
         print(f"  Saved to {video_out_path}")

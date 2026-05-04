@@ -1,19 +1,17 @@
 import gc
 import logging
-
-from utils.dataset import ShardingLMDBDataset, cycle
-from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
-from utils.misc import (
-    set_seed,
-    merge_dict_list
-)
-import torch.distributed as dist
-from omegaconf import OmegaConf
-from model import GAN
-import torch
-import wandb
-import time
 import os
+import time
+
+import torch
+import torch.distributed as dist
+import wandb
+from omegaconf import OmegaConf
+
+from model import GAN
+from utils.dataset import ShardingLMDBDataset, cycle
+from utils.distributed import EMA_FSDP, fsdp_state_dict, fsdp_wrap, launch_distributed_job
+from utils.misc import merge_dict_list, set_seed
 
 
 class Trainer:
@@ -58,7 +56,7 @@ class Trainer:
                 mode="online",
                 entity=config.wandb_entity,
                 project=config.wandb_project,
-                dir=config.wandb_save_dir
+                dir=config.wandb_save_dir,
             )
 
         self.output_path = config.logdir
@@ -70,14 +68,14 @@ class Trainer:
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
+            wrap_strategy=config.generator_fsdp_wrap_strategy,
         )
 
         self.model.fake_score = fsdp_wrap(
             self.model.fake_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.fake_score_fsdp_wrap_strategy
+            wrap_strategy=config.fake_score_fsdp_wrap_strategy,
         )
 
         self.model.text_encoder = fsdp_wrap(
@@ -85,18 +83,19 @@ class Trainer:
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
-            cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
+            cpu_offload=getattr(config, "text_encoder_cpu_offload", False),
         )
 
         if not config.no_visualize or config.load_raw_video:
             self.model.vae = self.model.vae.to(
-                device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
+                device=self.device,
+                dtype=torch.bfloat16 if config.mixed_precision else torch.float32,
+            )
 
         self.generator_optimizer = torch.optim.AdamW(
-            [param for param in self.model.generator.parameters()
-             if param.requires_grad],
+            [param for param in self.model.generator.parameters() if param.requires_grad],
             lr=config.gen_lr,
-            betas=(config.beta1, config.beta2)
+            betas=(config.beta1, config.beta2),
         )
 
         # Create separate parameter groups for the fake_score network
@@ -115,30 +114,30 @@ class Trainer:
         # Use the special learning rate for the special parameter group
         # and the default critic learning rate for other parameters
         self.critic_param_groups = [
-            {'params': fake_score_params, 'lr': config.critic_lr},
-            {'params': discriminator_params, 'lr': config.critic_lr * config.discriminator_lr_multiplier}
+            {"params": fake_score_params, "lr": config.critic_lr},
+            {
+                "params": discriminator_params,
+                "lr": config.critic_lr * config.discriminator_lr_multiplier,
+            },
         ]
         if self.in_discriminator_warmup:
             self.critic_optimizer = torch.optim.AdamW(
-                self.critic_param_groups,
-                betas=(0.9, config.beta2_critic)
+                self.critic_param_groups, betas=(0.9, config.beta2_critic)
             )
         else:
             self.critic_optimizer = torch.optim.AdamW(
-                self.critic_param_groups,
-                betas=(config.beta1_critic, config.beta2_critic)
+                self.critic_param_groups, betas=(config.beta1_critic, config.beta2_critic)
             )
 
         # Step 3: Initialize the dataloader
         self.data_path = config.data_path
         dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
         sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, shuffle=True, drop_last=True)
+            dataset, shuffle=True, drop_last=True
+        )
         dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=config.batch_size,
-            sampler=sampler,
-            num_workers=8)
+            dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8
+        )
 
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
@@ -147,8 +146,8 @@ class Trainer:
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
-        rename_param = (
-            lambda name: name.replace("_fsdp_wrapped_module.", "")
+        rename_param = lambda name: (
+            name.replace("_fsdp_wrapped_module.", "")
             .replace("_checkpoint_wrapped_module.", "")
             .replace("_orig_mod.", "")
         )
@@ -174,9 +173,7 @@ class Trainer:
                 state_dict = state_dict["generator"]
             elif "model" in state_dict:
                 state_dict = state_dict["model"]
-            self.model.generator.load_state_dict(
-                state_dict, strict=True
-            )
+            self.model.generator.load_state_dict(state_dict, strict=True)
         if hasattr(config, "load"):
             resume_ckpt_path_critic = os.path.join(config.load, "critic")
             resume_ckpt_path_generator = os.path.join(config.load, "generator")
@@ -207,10 +204,8 @@ class Trainer:
 
     def save(self):
         print("Start gathering distributed model states...")
-        generator_state_dict = fsdp_state_dict(
-            self.model.generator)
-        critic_state_dict = fsdp_state_dict(
-            self.model.fake_score)
+        generator_state_dict = fsdp_state_dict(self.model.generator)
+        critic_state_dict = fsdp_state_dict(self.model.fake_score)
 
         if self.config.ema_start_step < self.step:
             state_dict = {
@@ -225,12 +220,17 @@ class Trainer:
             }
 
         if self.is_main_process:
-            os.makedirs(os.path.join(self.output_path,
-                        f"checkpoint_model_{self.step:06d}"), exist_ok=True)
-            torch.save(state_dict, os.path.join(self.output_path,
-                       f"checkpoint_model_{self.step:06d}", "model.pt"))
-            print("Model saved to", os.path.join(self.output_path,
-                  f"checkpoint_model_{self.step:06d}", "model.pt"))
+            os.makedirs(
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}"), exist_ok=True
+            )
+            torch.save(
+                state_dict,
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
+            )
+            print(
+                "Model saved to",
+                os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"),
+            )
 
     def fwdbwd_one_step(self, batch, train_generator):
         self.model.eval()  # prevent any randomness (e.g. dropout)
@@ -245,10 +245,14 @@ class Trainer:
         else:
             frames = batch["frames"].to(device=self.device, dtype=self.dtype)
             with torch.no_grad():
-                clean_latent = self.model.vae.encode_to_latent(
-                    frames).to(device=self.device, dtype=self.dtype)
+                clean_latent = self.model.vae.encode_to_latent(frames).to(
+                    device=self.device, dtype=self.dtype
+                )
 
-            image_latent = clean_latent[:, 0:1, ]
+            image_latent = clean_latent[
+                :,
+                0:1,
+            ]
 
         batch_size = len(text_prompts)
         image_or_video_shape = list(self.config.image_or_video_shape)
@@ -256,14 +260,13 @@ class Trainer:
 
         # Step 2: Extract the conditional infos
         with torch.no_grad():
-            conditional_dict = self.model.text_encoder(
-                text_prompts=text_prompts)
+            conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
 
             if not getattr(self, "unconditional_dict", None):
                 unconditional_dict = self.model.text_encoder(
-                    text_prompts=[self.config.negative_prompt] * batch_size)
-                unconditional_dict = {k: v.detach()
-                                      for k, v in unconditional_dict.items()}
+                    text_prompts=[self.config.negative_prompt] * batch_size
+                )
+                unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
                 self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
             else:
                 unconditional_dict = self.unconditional_dict
@@ -280,18 +283,19 @@ class Trainer:
                 conditional_dict=conditional_dict,
                 unconditional_dict=unconditional_dict,
                 clean_latent=clean_latent,
-                initial_latent=image_latent if self.config.i2v else None
+                initial_latent=image_latent if self.config.i2v else None,
             )
 
             loss_ratio = mini_bs * self.world_size / full_bs
             total_loss = gan_G_loss * loss_ratio * self.loss_scale
 
             total_loss.backward()
-            generator_grad_norm = self.model.generator.clip_grad_norm_(
-                self.max_grad_norm_generator)
+            generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
 
-            generator_log_dict = {"generator_grad_norm": generator_grad_norm,
-                                  "gan_G_loss": gan_G_loss}
+            generator_log_dict = {
+                "generator_grad_norm": generator_grad_norm,
+                "gan_G_loss": gan_G_loss,
+            }
 
             return generator_log_dict
         else:
@@ -304,32 +308,31 @@ class Trainer:
             unconditional_dict=unconditional_dict,
             clean_latent=clean_latent,
             real_image_or_video=clean_latent,
-            initial_latent=image_latent if self.config.i2v else None
+            initial_latent=image_latent if self.config.i2v else None,
         )
 
         loss_ratio = mini_bs * dist.get_world_size() / full_bs
         total_loss = (gan_D_loss + 0.5 * (r1_loss + r2_loss)) * loss_ratio * self.loss_scale
 
         total_loss.backward()
-        critic_grad_norm = self.model.fake_score.clip_grad_norm_(
-            self.max_grad_norm_critic)
+        critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
 
-        critic_log_dict.update({"critic_grad_norm": critic_grad_norm,
-                                "gan_D_loss": gan_D_loss,
-                                "r1_loss": r1_loss,
-                                "r2_loss": r2_loss})
+        critic_log_dict.update(
+            {
+                "critic_grad_norm": critic_grad_norm,
+                "gan_D_loss": gan_D_loss,
+                "r1_loss": r1_loss,
+                "r2_loss": r2_loss,
+            }
+        )
 
         return critic_log_dict
 
     def generate_video(self, pipeline, prompts, image=None):
         batch_size = len(prompts)
-        sampled_noise = torch.randn(
-            [batch_size, 21, 16, 60, 104], device="cuda", dtype=self.dtype
-        )
+        sampled_noise = torch.randn([batch_size, 21, 16, 60, 104], device="cuda", dtype=self.dtype)
         video, _ = pipeline.inference(
-            noise=sampled_noise,
-            text_prompts=prompts,
-            return_latents=True
+            noise=sampled_noise, text_prompts=prompts, return_latents=True
         )
         current_video = video.permute(0, 1, 3, 4, 2).cpu().numpy() * 255.0
         return current_video
@@ -338,14 +341,17 @@ class Trainer:
         start_step = self.step
 
         while True:
-            if self.step == self.discriminator_warmup_steps and self.discriminator_warmup_steps != 0:
+            if (
+                self.step == self.discriminator_warmup_steps
+                and self.discriminator_warmup_steps != 0
+            ):
                 print("Resetting critic optimizer")
                 del self.critic_optimizer
                 torch.cuda.empty_cache()
                 # Create new optimizers
                 self.critic_optimizer = torch.optim.AdamW(
                     self.critic_param_groups,
-                    betas=(self.config.beta1_critic, self.config.beta2_critic)
+                    betas=(self.config.beta1_critic, self.config.beta2_critic),
                 )
                 # Update checkpointer references
                 self.checkpointer_critic.optimizer = self.critic_optimizer
@@ -353,7 +359,10 @@ class Trainer:
             self.in_discriminator_warmup = self.step < self.discriminator_warmup_steps
 
             # Only update generator and critic outside the warmup phase
-            TRAIN_GENERATOR = not self.in_discriminator_warmup and self.step % self.config.dfake_gen_update_ratio == 0
+            TRAIN_GENERATOR = (
+                not self.in_discriminator_warmup
+                and self.step % self.config.dfake_gen_update_ratio == 0
+            )
 
             # Train the generator (only outside warmup phase)
             if TRAIN_GENERATOR:
@@ -399,15 +408,24 @@ class Trainer:
 
             # If we just finished warmup, print a message
             if self.is_main_process and self.step == self.discriminator_warmup_steps:
-                print(f"Finished discriminator warmup after {self.discriminator_warmup_steps} steps")
+                print(
+                    f"Finished discriminator warmup after {self.discriminator_warmup_steps} steps"
+                )
 
             # Create EMA params (if not already created)
-            if (self.step >= self.config.ema_start_step) and \
-                    (self.generator_ema is None) and (self.config.ema_weight > 0):
+            if (
+                (self.step >= self.config.ema_start_step)
+                and (self.generator_ema is None)
+                and (self.config.ema_weight > 0)
+            ):
                 self.generator_ema = EMA_FSDP(self.model.generator, decay=self.config.ema_weight)
 
             # Save the model
-            if (not self.config.no_save) and (self.step - start_step) > 0 and self.step % self.config.log_iters == 0:
+            if (
+                (not self.config.no_save)
+                and (self.step - start_step) > 0
+                and self.step % self.config.log_iters == 0
+            ):
                 torch.cuda.empty_cache()
                 self.save()
                 torch.cuda.empty_cache()
@@ -422,12 +440,18 @@ class Trainer:
                 "r2_loss": critic_log_dict["r2_loss"],
             }
             if TRAIN_GENERATOR:
-                wandb_loss_dict.update({
-                    "generator_grad_norm": generator_log_dict["generator_grad_norm"],
-                })
+                wandb_loss_dict.update(
+                    {
+                        "generator_grad_norm": generator_log_dict["generator_grad_norm"],
+                    }
+                )
             self.all_gather_dict(wandb_loss_dict)
-            wandb_loss_dict["diff_logit"] = wandb_loss_dict["real_logit"] - wandb_loss_dict["fake_logit"]
-            wandb_loss_dict["reg_loss"] = 0.5 * (wandb_loss_dict["r1_loss"] + wandb_loss_dict["r2_loss"])
+            wandb_loss_dict["diff_logit"] = (
+                wandb_loss_dict["real_logit"] - wandb_loss_dict["fake_logit"]
+            )
+            wandb_loss_dict["reg_loss"] = 0.5 * (
+                wandb_loss_dict["r1_loss"] + wandb_loss_dict["r2_loss"]
+            )
 
             if self.is_main_process:
                 if self.in_discriminator_warmup:
@@ -451,14 +475,17 @@ class Trainer:
                     self.previous_time = current_time
                 else:
                     if not self.disable_wandb:
-                        wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
+                        wandb.log(
+                            {"per iteration time": current_time - self.previous_time},
+                            step=self.step,
+                        )
                     self.previous_time = current_time
 
     def all_gather_dict(self, target_dict):
         for key, value in target_dict.items():
             gathered_value = torch.zeros(
-                [self.world_size, *value.shape],
-                dtype=value.dtype, device=self.device)
+                [self.world_size, *value.shape], dtype=value.dtype, device=self.device
+            )
             dist.all_gather_into_tensor(gathered_value, value)
             avg_value = gathered_value.mean().item()
             target_dict[key] = avg_value

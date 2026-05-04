@@ -49,9 +49,7 @@ class Bench2DriveLatentDataset(Dataset):
             path = self.latent_dir / f"{ep}.pt"
             if not path.exists():
                 continue
-            latents = torch.load(
-                path, map_location="cpu", weights_only=True, mmap=True
-            )
+            latents = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
             T = latents.shape[0]
             if T >= num_frames:
                 self.episodes.append(ep)

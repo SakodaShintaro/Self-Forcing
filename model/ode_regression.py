@@ -1,6 +1,7 @@
-import torch.nn.functional as F
 from typing import Tuple
+
 import torch
+import torch.nn.functional as F
 
 from model.base import BaseModel
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
@@ -23,11 +24,8 @@ class ODERegression(BaseModel):
         self.generator.model.requires_grad_(True)
         if getattr(args, "generator_ckpt", False):
             print(f"Loading pretrained generator from {args.generator_ckpt}")
-            state_dict = torch.load(args.generator_ckpt, map_location="cpu")[
-                'generator']
-            self.generator.load_state_dict(
-                state_dict, strict=True
-            )
+            state_dict = torch.load(args.generator_ckpt, map_location="cpu")["generator"]
+            self.generator.load_state_dict(state_dict, strict=True)
 
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
 
@@ -54,7 +52,9 @@ class ODERegression(BaseModel):
         self.vae.requires_grad_(False)
 
     @torch.no_grad()
-    def _prepare_generator_input(self, ode_latent: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _prepare_generator_input(
+        self, ode_latent: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Given a tensor containing the whole ODE sampling trajectories,
         randomly choose an intermediate timestep and return the latent as well as the corresponding timestep.
@@ -73,15 +73,17 @@ class ODERegression(BaseModel):
             batch_size,
             num_frames,
             self.num_frame_per_block,
-            uniform_timestep=False
+            uniform_timestep=False,
         )
         if self.args.i2v:
             index[:, 0] = len(self.denoising_step_list) - 1
 
         noisy_input = torch.gather(
-            ode_latent, dim=1,
-            index=index.reshape(batch_size, 1, num_frames, 1, 1, 1).expand(
-                -1, -1, -1, num_channels, height, width).to(self.device)
+            ode_latent,
+            dim=1,
+            index=index.reshape(batch_size, 1, num_frames, 1, 1, 1)
+            .expand(-1, -1, -1, num_channels, height, width)
+            .to(self.device),
         ).squeeze(1)
 
         timestep = self.denoising_step_list[index].to(self.device)
@@ -99,7 +101,9 @@ class ODERegression(BaseModel):
 
         return noisy_input, timestep
 
-    def generator_loss(self, ode_latent: torch.Tensor, conditional_dict: dict) -> Tuple[torch.Tensor, dict]:
+    def generator_loss(
+        self, ode_latent: torch.Tensor, conditional_dict: dict
+    ) -> Tuple[torch.Tensor, dict]:
         """
         Generate image/videos from noisy latents and compute the ODE regression loss.
         Input:
@@ -113,23 +117,21 @@ class ODERegression(BaseModel):
         # Step 1: Run generator on noisy latents
         target_latent = ode_latent[:, -1]
 
-        noisy_input, timestep = self._prepare_generator_input(
-            ode_latent=ode_latent)
+        noisy_input, timestep = self._prepare_generator_input(ode_latent=ode_latent)
 
         _, pred_image_or_video = self.generator(
-            noisy_image_or_video=noisy_input,
-            conditional_dict=conditional_dict,
-            timestep=timestep
+            noisy_image_or_video=noisy_input, conditional_dict=conditional_dict, timestep=timestep
         )
 
         # Step 2: Compute the regression loss
         mask = timestep != 0
 
-        loss = F.mse_loss(
-            pred_image_or_video[mask], target_latent[mask], reduction="mean")
+        loss = F.mse_loss(pred_image_or_video[mask], target_latent[mask], reduction="mean")
 
         log_dict = {
-            "unnormalized_loss": F.mse_loss(pred_image_or_video, target_latent, reduction='none').mean(dim=[1, 2, 3, 4]).detach(),
+            "unnormalized_loss": F.mse_loss(pred_image_or_video, target_latent, reduction="none")
+            .mean(dim=[1, 2, 3, 4])
+            .detach(),
             "timestep": timestep.float().mean(dim=1).detach(),
             "input": noisy_input.detach(),
             "output": pred_image_or_video.detach(),

@@ -1,12 +1,14 @@
-from utils.lmdb import get_array_shape_from_lmdb, retrieve_row_from_lmdb
-from torch.utils.data import Dataset
+import json
+import os
+from pathlib import Path
+
+import lmdb
 import numpy as np
 import torch
-import lmdb
-import json
-from pathlib import Path
 from PIL import Image
-import os
+from torch.utils.data import Dataset
+
+from utils.lmdb import get_array_shape_from_lmdb, retrieve_row_from_lmdb
 
 
 class TextDataset(Dataset):
@@ -36,10 +38,9 @@ class TextDataset(Dataset):
 
 class ODERegressionLMDBDataset(Dataset):
     def __init__(self, data_path: str, max_pair: int = int(1e8)):
-        self.env = lmdb.open(data_path, readonly=True,
-                             lock=False, readahead=False, meminit=False)
+        self.env = lmdb.open(data_path, readonly=True, lock=False, readahead=False, meminit=False)
 
-        self.latents_shape = get_array_shape_from_lmdb(self.env, 'latents')
+        self.latents_shape = get_array_shape_from_lmdb(self.env, "latents")
         self.max_pair = max_pair
 
     def __len__(self):
@@ -52,21 +53,14 @@ class ODERegressionLMDBDataset(Dataset):
             - latents: Tensor of shape (num_denoising_steps, num_frames, num_channels, height, width). It is ordered from pure noise to clean image.
         """
         latents = retrieve_row_from_lmdb(
-            self.env,
-            "latents", np.float16, idx, shape=self.latents_shape[1:]
+            self.env, "latents", np.float16, idx, shape=self.latents_shape[1:]
         )
 
         if len(latents.shape) == 4:
             latents = latents[None, ...]
 
-        prompts = retrieve_row_from_lmdb(
-            self.env,
-            "prompts", str, idx
-        )
-        return {
-            "prompts": prompts,
-            "ode_latent": torch.tensor(latents, dtype=torch.float32)
-        }
+        prompts = retrieve_row_from_lmdb(self.env, "prompts", str, idx)
+        return {"prompts": prompts, "ode_latent": torch.tensor(latents, dtype=torch.float32)}
 
 
 class ShardingLMDBDataset(Dataset):
@@ -76,16 +70,12 @@ class ShardingLMDBDataset(Dataset):
 
         for fname in sorted(os.listdir(data_path)):
             path = os.path.join(data_path, fname)
-            env = lmdb.open(path,
-                            readonly=True,
-                            lock=False,
-                            readahead=False,
-                            meminit=False)
+            env = lmdb.open(path, readonly=True, lock=False, readahead=False, meminit=False)
             self.envs.append(env)
 
         self.latents_shape = [None] * len(self.envs)
         for shard_id, env in enumerate(self.envs):
-            self.latents_shape[shard_id] = get_array_shape_from_lmdb(env, 'latents')
+            self.latents_shape[shard_id] = get_array_shape_from_lmdb(env, "latents")
             for local_i in range(self.latents_shape[shard_id][0]):
                 self.index.append((shard_id, local_i))
 
@@ -98,40 +88,30 @@ class ShardingLMDBDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-            Outputs:
-                - prompts: List of Strings
-                - latents: Tensor of shape (num_denoising_steps, num_frames, num_channels, height, width). It is ordered from pure noise to clean image.
+        Outputs:
+            - prompts: List of Strings
+            - latents: Tensor of shape (num_denoising_steps, num_frames, num_channels, height, width). It is ordered from pure noise to clean image.
         """
         shard_id, local_idx = self.index[idx]
 
         latents = retrieve_row_from_lmdb(
             self.envs[shard_id],
-            "latents", np.float16, local_idx,
-            shape=self.latents_shape[shard_id][1:]
+            "latents",
+            np.float16,
+            local_idx,
+            shape=self.latents_shape[shard_id][1:],
         )
 
         if len(latents.shape) == 4:
             latents = latents[None, ...]
 
-        prompts = retrieve_row_from_lmdb(
-            self.envs[shard_id],
-            "prompts", str, local_idx
-        )
+        prompts = retrieve_row_from_lmdb(self.envs[shard_id], "prompts", str, local_idx)
 
-        return {
-            "prompts": prompts,
-            "ode_latent": torch.tensor(latents, dtype=torch.float32)
-        }
+        return {"prompts": prompts, "ode_latent": torch.tensor(latents, dtype=torch.float32)}
 
 
 class TextImagePairDataset(Dataset):
-    def __init__(
-        self,
-        data_dir,
-        transform=None,
-        eval_first_n=-1,
-        pad_to_multiple_of=None
-    ):
+    def __init__(self, data_dir, transform=None, eval_first_n=-1, pad_to_multiple_of=None):
         """
         Args:
             data_dir (str): Path to the directory containing:
@@ -143,7 +123,7 @@ class TextImagePairDataset(Dataset):
         data_dir = Path(data_dir)
 
         # Find the metadata JSON file
-        metadata_files = list(data_dir.glob('target_crop_info_*.json'))
+        metadata_files = list(data_dir.glob("target_crop_info_*.json"))
         if not metadata_files:
             raise FileNotFoundError(f"No metadata file found in {data_dir}")
         if len(metadata_files) > 1:
@@ -151,7 +131,7 @@ class TextImagePairDataset(Dataset):
 
         metadata_path = metadata_files[0]
         # Extract aspect ratio from metadata filename (e.g. target_crop_info_26-15.json -> 26-15)
-        aspect_ratio = metadata_path.stem.split('_')[-1]
+        aspect_ratio = metadata_path.stem.split("_")[-1]
 
         # Use aspect ratio subfolder for images
         self.image_dir = data_dir / aspect_ratio
@@ -159,7 +139,7 @@ class TextImagePairDataset(Dataset):
             raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
 
         # Load metadata
-        with open(metadata_path, 'r') as f:
+        with open(metadata_path, "r") as f:
             self.metadata = json.load(f)
 
         eval_first_n = eval_first_n if eval_first_n != -1 else len(self.metadata)
@@ -167,7 +147,7 @@ class TextImagePairDataset(Dataset):
 
         # Verify all images exist
         for item in self.metadata:
-            for name in (item['file_names'] if 'file_names' in item else [item['file_name']]):
+            for name in item["file_names"] if "file_names" in item else [item["file_name"]]:
                 image_path = self.image_dir / name
                 if not image_path.exists():
                     raise FileNotFoundError(f"Image not found: {image_path}")
@@ -192,23 +172,23 @@ class TextImagePairDataset(Dataset):
         """
         item = self.metadata[idx]
 
-        file_names = (item['file_names'] if 'file_names' in item else [item['file_name']])
+        file_names = item["file_names"] if "file_names" in item else [item["file_name"]]
         frames = []
         for name in file_names:
-            img = Image.open(self.image_dir / name).convert('RGB')
+            img = Image.open(self.image_dir / name).convert("RGB")
             if self.transform:
                 img = self.transform(img)
             frames.append(img)
         image = torch.stack(frames, dim=1)  # (C, T, H, W)
 
         return {
-            'image': image,
-            'prompts': item['caption'],
-            'target_bbox': item['target_crop']['target_bbox'],
-            'target_ratio': item['target_crop']['target_ratio'],
-            'type': item['type'],
-            'origin_size': (item['origin_width'], item['origin_height']),
-            'idx': idx
+            "image": image,
+            "prompts": item["caption"],
+            "target_bbox": item["target_crop"]["target_bbox"],
+            "target_ratio": item["target_crop"]["target_ratio"],
+            "type": item["type"],
+            "origin_size": (item["origin_width"], item["origin_height"]),
+            "idx": idx,
         }
 
 
