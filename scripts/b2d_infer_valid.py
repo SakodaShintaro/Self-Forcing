@@ -327,7 +327,6 @@ def main() -> None:
                 text_prompts=[fixed_caption],
                 return_latents=True,
                 initial_latent=initial_latent,
-                low_memory=False,
             )
             # all_lat: (1, K_lat + pred_lat, 16, 60, 104). Keep only the predicted block.
             pred_block_latents.append(all_lat[:, -pred_lat:].cpu())

@@ -2,12 +2,6 @@ from typing import List, Optional
 
 import torch
 
-from demo_utils.memory import (
-    DynamicSwapInstaller,
-    get_cuda_free_memory_gb,
-    gpu,
-    move_model_to_device_with_memory_preservation,
-)
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
 
@@ -53,7 +47,6 @@ class CausalInferencePipeline(torch.nn.Module):
         initial_latent: Optional[torch.Tensor] = None,
         return_latents: bool = False,
         profile: bool = False,
-        low_memory: bool = False,
     ) -> torch.Tensor:
         """
         Perform inference on the given noise and text prompts.
@@ -86,12 +79,6 @@ class CausalInferencePipeline(torch.nn.Module):
         num_input_frames = initial_latent.shape[1] if initial_latent is not None else 0
         num_output_frames = num_frames + num_input_frames  # add the initial latent frames
         conditional_dict = self.text_encoder(text_prompts=text_prompts)
-
-        if low_memory:
-            gpu_memory_preservation = get_cuda_free_memory_gb(gpu) + 5
-            move_model_to_device_with_memory_preservation(
-                self.text_encoder, target_device=gpu, preserved_memory_gb=gpu_memory_preservation
-            )
 
         output = torch.zeros(
             [batch_size, num_output_frames, num_channels, height, width],
