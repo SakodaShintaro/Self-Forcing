@@ -47,7 +47,7 @@ def encode_episode(
     pixels = torch.stack(frames, dim=1).unsqueeze(0)  # (1, 3, T, H, W)
     pixels = pixels.to(device=device, dtype=torch.bfloat16)
 
-    # Truncate to 1 + 4*N frames (encode requirement when use_cache=False)
+    # Truncate to 1 + 4*N frames (Wan VAE encoder requirement)
     T = pixels.shape[2]
     T_eff = 1 + 4 * ((T - 1) // 4)
     if T_eff < 1:

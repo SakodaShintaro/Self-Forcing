@@ -10,7 +10,7 @@ class CausalInferencePipeline(torch.nn.Module):
         super().__init__()
         # Step 1: Initialize all models
         self.generator = (
-            WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=True)
+            WanDiffusionWrapper(**getattr(args, "model_kwargs", {}))
             if generator is None
             else generator
         )
@@ -186,7 +186,7 @@ class CausalInferencePipeline(torch.nn.Module):
             current_start_frame += current_num_frames
 
         # Step 4: Decode the output
-        video = self.vae.decode_to_pixel(output, use_cache=False)
+        video = self.vae.decode_to_pixel(output)
         video = (video * 0.5 + 0.5).clamp(0, 1)
 
         if return_latents:

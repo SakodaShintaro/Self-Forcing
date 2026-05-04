@@ -9,7 +9,7 @@ from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 class CausalDiffusion(nn.Module):
     def __init__(self, args, device):
         super().__init__()
-        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=True)
+        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}))
         self.generator.model.requires_grad_(True)
 
         self.text_encoder = WanTextEncoder()

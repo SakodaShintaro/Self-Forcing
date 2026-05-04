@@ -83,7 +83,7 @@ def _load_state_dict(path: str) -> dict:
 
 def _decode_latent_to_uint8(pipeline, latents_thwc: torch.Tensor) -> torch.Tensor:
     """latents_thwc: (B, T, 16, 60, 104) on GPU. Returns (T_pix, H, W, 3) uint8 on CPU."""
-    video = pipeline.vae.decode_to_pixel(latents_thwc, use_cache=False)
+    video = pipeline.vae.decode_to_pixel(latents_thwc)
     video = (video * 0.5 + 0.5).clamp(0, 1)
     pipeline.vae.model.clear_cache()
     return (video[0].permute(0, 2, 3, 1).cpu().float() * 255).to(torch.uint8)
