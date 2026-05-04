@@ -1,6 +1,5 @@
 import argparse
 import gc
-import logging
 import os
 import sys
 import time
@@ -279,7 +278,6 @@ class Trainer:
         )
 
         if self.step % self.config.gc_interval == 0:
-            logging.info("DistGarbageCollector: Running GC.")
             gc.collect()
 
         # Step 5: Lazily build the EMA shadow at ema_start_step, then update each iter.
