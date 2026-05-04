@@ -46,7 +46,9 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.causal_inference import CausalInferencePipeline  # noqa: E402
-from utils.misc import resolve_checkpoint_path, set_seed  # noqa: E402
+from utils.misc import load_generator_state_dict, resolve_checkpoint_path, set_seed  # noqa: E402
+
+_INFERENCE_KEY_ORDER = ("generator_ema", "generator", "model")
 
 
 class _CachedTextEncoder(torch.nn.Module):
@@ -65,20 +67,6 @@ class _CachedTextEncoder(torch.nn.Module):
 
     def forward(self, text_prompts):
         return {k: getattr(self, f"_cached_{k}") for k in self._cached_keys}
-
-
-def _load_state_dict(path: str) -> dict:
-    sd = torch.load(path, map_location="cpu", weights_only=False)
-    for k in ("generator_ema", "generator", "model"):
-        if k in sd:
-            sd = sd[k]
-            break
-    return {
-        k.replace("_fsdp_wrapped_module.", "")
-        .replace("_checkpoint_wrapped_module.", "")
-        .replace("_orig_mod.", ""): v
-        for k, v in sd.items()
-    }
 
 
 def _decode_latent_to_uint8(pipeline, latents_thwc: torch.Tensor) -> torch.Tensor:
@@ -241,7 +229,10 @@ def main() -> None:
 
     base_ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
     print(f"loading base ckpt: {base_ckpt_path}")
-    pipeline.generator.load_state_dict(_load_state_dict(base_ckpt_path), strict=True)
+    pipeline.generator.load_state_dict(
+        load_generator_state_dict(base_ckpt_path, prefer_keys=_INFERENCE_KEY_ORDER),
+        strict=True,
+    )
 
     # LoRA-only path: always wrap the generator with the same adapter shape used
     # at training time. Without --checkpoint_path the LoRA layers stay zero-init
@@ -262,7 +253,9 @@ def main() -> None:
     pipeline.generator.model = get_peft_model(pipeline.generator.model, peft_cfg)
 
     if args.checkpoint_path:
-        sd = _load_state_dict(resolve_checkpoint_path(args.checkpoint_path))
+        sd = load_generator_state_dict(
+            resolve_checkpoint_path(args.checkpoint_path), prefer_keys=_INFERENCE_KEY_ORDER
+        )
         missing, unexpected = pipeline.generator.load_state_dict(sd, strict=False)
         print(f"finetune load: {len(missing)} missing, {len(unexpected)} unexpected")
 

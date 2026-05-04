@@ -12,7 +12,12 @@ from omegaconf import OmegaConf
 from model import CausalDiffusion
 from utils.b2d_dataset import Bench2DriveLatentDataset
 from utils.distributed import EMA_FSDP, barrier, fsdp_state_dict, fsdp_wrap, launch_distributed_job
-from utils.misc import resolve_checkpoint_path, set_seed
+from utils.misc import (
+    load_generator_state_dict,
+    resolve_checkpoint_path,
+    set_seed,
+    strip_wrap_prefixes,
+)
 
 
 def cycle(dl):
@@ -84,22 +89,9 @@ class Trainer:
         if getattr(config, "generator_ckpt", False):
             ckpt_path = resolve_checkpoint_path(config.generator_ckpt)
             print(f"Loading pretrained generator from {ckpt_path}")
-            state_dict = torch.load(ckpt_path, map_location="cpu")
-            ckpt_key = getattr(config, "generator_ckpt_key", None)
-            if ckpt_key and ckpt_key in state_dict:
-                state_dict = state_dict[ckpt_key]
-            elif "generator" in state_dict:
-                state_dict = state_dict["generator"]
-            elif "generator_ema" in state_dict:
-                state_dict = state_dict["generator_ema"]
-            elif "model" in state_dict:
-                state_dict = state_dict["model"]
-            cleaned = {
-                k.replace("_fsdp_wrapped_module.", "")
-                .replace("_checkpoint_wrapped_module.", "")
-                .replace("_orig_mod.", ""): v
-                for k, v in state_dict.items()
-            }
+            cleaned = load_generator_state_dict(
+                ckpt_path, explicit_key=getattr(config, "generator_ckpt_key", None)
+            )
             self.model.generator.load_state_dict(cleaned, strict=True)
 
         # Step 2.2: Attach LoRA adapters (after base load, before FSDP).
@@ -191,18 +183,11 @@ class Trainer:
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
-        rename_param = lambda name: (
-            name.replace("_fsdp_wrapped_module.", "")
-            .replace("_checkpoint_wrapped_module.", "")
-            .replace("_orig_mod.", "")
-        )
         self.name_to_trainable_params = {}
         for n, p in self.model.generator.named_parameters():
             if not p.requires_grad:
                 continue
-
-            renamed_n = rename_param(n)
-            self.name_to_trainable_params[renamed_n] = p
+            self.name_to_trainable_params[strip_wrap_prefixes(n)] = p
         ema_weight = config.ema_weight
         self.generator_ema = None
         if (ema_weight is not None) and (ema_weight > 0.0):
@@ -225,16 +210,11 @@ class Trainer:
         # LoRA-only save: drop frozen base weights so checkpoints stay tiny.
         # Match by canonical (renamed) name to be robust to FSDP / checkpoint /
         # torch.compile wrapper prefixes.
-        def _rename(k: str) -> str:
-            return (
-                k.replace("_fsdp_wrapped_module.", "")
-                .replace("_checkpoint_wrapped_module.", "")
-                .replace("_orig_mod.", "")
-            )
-
         trainable_renamed = set(self.name_to_trainable_params.keys())
         generator_state_dict = {
-            k: v for k, v in generator_state_dict.items() if _rename(k) in trainable_renamed
+            k: v
+            for k, v in generator_state_dict.items()
+            if strip_wrap_prefixes(k) in trainable_renamed
         }
 
         state_dict = {"generator": generator_state_dict}
