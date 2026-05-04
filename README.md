@@ -1,93 +1,91 @@
-# Self-Forcing
+# Self-Forcing (bench2drive LoRA fork)
 
-This repository is a fork of <https://github.com/guandeh17/Self-Forcing>.
+This repository is a stripped-down fork of <https://github.com/guandeh17/Self-Forcing>, focused on LoRA fine-tuning the Wan 2.1 T2V-1.3B causal generator on [bench2drive](https://github.com/Thinklab-SJTU/Bench2Drive) episode latents and evaluating the adapted checkpoint on the held-out split.
 
-## 概要
+## What changed from upstream
 
-CARLA streaming 推論用に以下の改修を加えています:
+- **Single trainer / model / pipeline path**. Removed GAN, ODE, score-distillation trainers; removed bidirectional / non-causal pipelines; removed CausVid / DMD / SiD / GAN / ODE model variants. Only the causal diffusion + LoRA path remains.
+- **bench2drive-specific dataset**: `utils/b2d_dataset.Bench2DriveLatentDataset` consumes precomputed per-episode latent tensors and serves random fixed-length windows.
+- **LoRA is mandatory.** Training fails fast unless `lora.enabled: true` is set in the config. Saved checkpoints contain only trainable (LoRA + EMA) parameters, so each `model.pt` is a few MB instead of ~11 GB.
+- **In-loop validation.** Every `valid_iters` train steps we run a fixed number of forward-only `generator_loss` evaluations on the valid split (with frozen RNG for comparability) and log `val/loss` to wandb / stdout.
+- **`train.py` is self-contained**. The trainer class moved out of `trainer/` into `train.py` and the trainer dispatch was removed.
+- **Single config**. `configs/default_config.yaml` was inlined into `configs/b2d_finetune.yaml`.
+- **Wan minimal subset**. Dropped `wan/{configs,distributed,utils,image2video.py,text2video.py}` and `wan/modules/{clip,xlm_roberta}.py`; the kept subset is `wan/modules/{attention, causal_model, model, t5, tokenizers, vae}.py`.
+- Dropped `inference.py` / `demo.py` / `demo_utils/` (Gradio demo + low-memory swapping helpers used only by the demo).
+- `b2d_root` is set per-machine via the `--b2d_root` CLI flag rather than committed to the yaml.
+- `--root_dir` creates a fresh timestamped subdir for every run (logs, checkpoints, wandb files).
 
-- 依存解決を `pyproject.toml` (uv 管理) に移行
-- モデル取得を HuggingFace Hub 経由に変更（`wan_models/` のローカル展開不要）
-- `inference.py` の `--checkpoint_path` で `hf:<repo>:<filename>` 形式をサポート
-- `TextImagePairDataset` を **multi-frame** (`file_names` リスト) 対応に拡張
-- `inference.py` の I2V 分岐を `(B, C, T, H, W)` 直渡しに変更（複数フレームを initial latent としてエンコード可能）
-- CARLA 画像を I2V 用に letterbox 整形する `scripts/prepare_carla_i2v.py` を追加
-
-## セットアップ
+## Setup
 
 ```bash
 cd ~/work/Self-Forcing
 uv sync
 ```
 
-`uv sync` で `.venv` 配下に PyTorch 2.7+cu128, flash-attn 2.8.1 等が入ります。
-モデルファイル（VAE / T5 / DiT）は初回実行時に HF Hub から自動ダウンロードされます。
+Wan 2.1 weights (VAE / T5 / DiT) are pulled from HuggingFace Hub on first run. The `generator_ckpt: hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt` entry in the config fetches the pre-distilled DMD checkpoint that we adapt with LoRA.
 
-## I2V (CARLA データ)
+## End-to-end workflow
 
-### Step 1: 入力フレームの前処理
+The expected layout under `<b2d_root>` (default in this repo: `/home/sakoda/data/bench2drive`):
 
-```bash
-uv run python scripts/prepare_carla_i2v.py \
-    --src /path/to/carla/obs/ep_xxxxxxxx/ \
-    --dst data/carla_sample \
-    --caption "First-person dashcam view ..." \
-    --num_frames 9 \
-    --start_index 20
+```text
+<b2d_root>/
+├── splits.json                              # produced by scripts/b2d_split.py
+├── latents/
+│   ├── train/<episode>.pt                   # produced by scripts/b2d_encode_latents.py
+│   └── valid/<episode>.pt
+└── <episode>/                               # raw bench2drive episodes
+    └── camera/rgb_front/*.jpg
 ```
 
-- 入力 PNG を **letterbox** で 832×480 に整形（情報を失わない、上下/左右に黒帯）
-- `data/carla_sample/target_crop_info_carla.json` と `data/carla_sample/carla/*.png` を生成
-- `--start_index` で先頭から飛ばす枚数を指定
-
-`--num_frames` の指針（VAE のテンポラル粒度）:
-
-| pixel frame | latent | 用途 |
-| --- | --- | --- |
-| 1 | 1 | 単フレーム I2V |
-| 9 | 3 | 1 block ぶんの context（最小実用単位） |
-| 13 | 4 | I2V + 1 latent context |
-| 17 | 5 | I2V + 2 latent context |
-
-(VAE の 1 latent = 1 + 4 × N pixel frame で、`N=2` のとき 9 pixel)
-
-### Step 2: 推論
+### 1. Build the train/valid split
 
 ```bash
-uv run python inference.py \
-    --config_path configs/self_forcing_dmd.yaml \
-    --output_folder videos/carla_sample \
-    --checkpoint_path hf:gdhe17/Self-Forcing:checkpoints/self_forcing_dmd.pt \
-    --data_path data/carla_sample \
-    --num_output_frames 21 \
-    --i2v \
-    --use_ema
+uv run python scripts/b2d_split.py --src <b2d_root>
 ```
 
-制約:
+Episodes are partitioned deterministically by Route ID hash. Output: `<b2d_root>/splits.json`.
 
-- `--num_output_frames` は **総 latent 数**（入力 latent + 生成ノイズ latent）
-- `(num_output_frames - num_input_latents)` が `num_frame_per_block` (= 3) の倍数である必要あり
+### 2. Pre-encode VAE latents (one-time)
 
-入力 3 latent (= 9 px) のときの取りうる値:
+```bash
+uv run python scripts/b2d_encode_latents.py --src <b2d_root>
+```
 
-| `--num_output_frames` | input | 生成 latent | 備考 |
-| --- | --- | --- | --- |
-| **6** | 3 | 3 | 最小（1 block 生成） |
-| 9 | 3 | 6 | |
-| 12 | 3 | 9 | |
-| 15 | 3 | 12 | |
-| 18 | 3 | 15 | |
-| **21** | 3 | 18 | `self_forcing_dmd.pt` の上限 (KV cache = 21 latent) |
-| > 21 | — | — | `self_forcing_10s.pt` (10 秒 ≈ 161 latent 対応) が必要 |
+Runs the Wan VAE encoder over every episode's `rgb_front/*.jpg` stream and dumps a `(T_lat, 16, 60, 104)` bf16 tensor per episode under `<b2d_root>/latents/{train,valid}/`. Existing files are skipped, so the script is resumable.
 
-- 出力は **16 fps** (Wan 2.1 の学習レート)。21 latent ≈ 5.25 秒
-- `inference.py` の `write_video(..., fps=16)` は mp4 メタデータ上の再生速度。値を変えると再生速度が変わるだけで、生成された動きの速度は 16 fps 固定
+### 3. LoRA fine-tune
 
-## 解像度について
+```bash
+uv run python train.py \
+    --config_path configs/b2d_finetune.yaml \
+    --b2d_root <b2d_root> \
+    --root_dir /path/to/results
+```
 
-**832×480** (Wan 2.1 T2V-1.3B が 480p で学習されているため)
+Each run lands at `<root_dir>/<YYYYmmdd_HHMMSS>_b2d_finetune/`. wandb files, logs and `checkpoint_model_<step>/model.pt` are all written there. `local/train.sh` is a thin wrapper with the local paths baked in.
 
-## オリジナル README
+Key knobs in [`configs/b2d_finetune.yaml`](configs/b2d_finetune.yaml):
 
-オリジナルの開発・学習手順は [https://github.com/guandeh17/Self-Forcing](https://github.com/guandeh17/Self-Forcing) を参照してください。
+| key | meaning |
+| --- | --- |
+| `lora.{rank, alpha, target_modules}` | LoRA shape; `target_modules` defaults to all attention `q/k/v/o` |
+| `image_or_video_shape` | `[1, 21, 16, 60, 104]` — 21-latent clip per training step |
+| `num_frame_per_block` | `3` — must match the base DMD checkpoint |
+| `max_steps` | hard step cap for the training loop |
+| `log_iters` | save a checkpoint every N steps |
+| `valid_iters` / `valid_batches` | run validation every N steps over M batches |
+| `ema_weight` / `ema_start_step` | EMA over LoRA params, lazily started at the threshold step |
+
+### 4. Evaluate a checkpoint
+
+```bash
+uv run python scripts/b2d_infer_valid.py \
+    --config_path configs/b2d_finetune.yaml \
+    --b2d_root <b2d_root> \
+    --checkpoint_path <run_dir>/checkpoint_model_<step>/model.pt
+```
+
+For each valid episode we slide a `K=num_context_blocks=1` ground-truth context window over the saved latent stream, ask the LoRA-adapted model to denoise the next block (KV cache reset per call), decode pred + GT through the Wan VAE and emit a side-by-side MP4 plus per-frame / per-block PSNR. Output lands at `<ckpt_dir>/<YYYYmmdd_HHMMSS>_eval/`.
+
+Without `--checkpoint_path` the LoRA layers stay zero-initialised, giving you the pretrained baseline as a sanity number. `local/valid.sh` is a thin wrapper that takes a checkpoint path as `$1`.
