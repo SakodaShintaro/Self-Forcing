@@ -510,8 +510,6 @@ def main():
     _set_distributed_defaults()
 
     config = OmegaConf.load(args.config_path)
-    default_config = OmegaConf.load("configs/default_config.yaml")
-    config = OmegaConf.merge(default_config, config)
     config.no_save = args.no_save
     config.no_visualize = args.no_visualize
 

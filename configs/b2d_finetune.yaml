@@ -40,6 +40,7 @@ timestep_shift: 5.0
 guidance_scale: 0.0   # we are not training a CFG distillation; loss does not use it
 teacher_forcing: false
 noise_augmentation_max_timestep: 0
+context_noise: 0   # noise level for KV-cache context refresh in CausalInferencePipeline
 
 # --- model shape ---
 image_or_video_shape:

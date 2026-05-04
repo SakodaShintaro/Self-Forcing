@@ -226,10 +226,7 @@ def main() -> None:
         out_dir = args.out_root / f"{stamp}_{args.tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    config = OmegaConf.merge(
-        OmegaConf.load("configs/default_config.yaml"),
-        OmegaConf.load(args.config_path),
-    )
+    config = OmegaConf.load(args.config_path)
     config.b2d_root = args.b2d_root
     config.denoising_step_list = [1000, 750, 500, 250]
     config.warp_denoising_step = True
