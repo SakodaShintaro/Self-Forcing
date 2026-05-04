@@ -32,12 +32,6 @@ class CausalDiffusion(nn.Module):
         if args.gradient_checkpointing:
             self.generator.enable_gradient_checkpointing()
 
-        self.num_train_timestep = args.num_train_timestep
-        self.min_step = int(0.02 * self.num_train_timestep)
-        self.max_step = int(0.98 * self.num_train_timestep)
-        self.guidance_scale = args.guidance_scale
-        self.timestep_shift = getattr(args, "timestep_shift", 1.0)
-
     def _get_timestep(
         self,
         min_timestep: int,
@@ -66,7 +60,6 @@ class CausalDiffusion(nn.Module):
         self,
         image_or_video_shape,
         conditional_dict: dict,
-        unconditional_dict: dict,
         clean_latent: torch.Tensor,
         initial_latent: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, dict]:

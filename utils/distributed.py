@@ -132,18 +132,8 @@ class EMA_FSDP:
             for n, p in fsdp_module.module.named_parameters():
                 self.shadow[n].mul_(d).add_(p.detach().float().cpu(), alpha=1.0 - d)
 
-    # Optional helpers ---------------------------------------------------
     def state_dict(self):
         return self.shadow  # picklable
 
     def load_state_dict(self, sd):
         self.shadow = {k: v.clone() for k, v in sd.items()}
-
-    def copy_to(self, fsdp_module):
-        # load EMA weights into an (unwrapped) copy of the generator
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
-        with FSDP.summon_full_params(fsdp_module, writeback=True):
-            for n, p in fsdp_module.module.named_parameters():
-                if n in self.shadow:
-                    p.data.copy_(self.shadow[n].to(p.dtype, device=p.device))

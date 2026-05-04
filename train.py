@@ -249,24 +249,14 @@ class Trainer:
         image_or_video_shape = list(self.config.image_or_video_shape)
         image_or_video_shape[0] = batch_size
 
-        # Step 2: Extract the conditional infos
+        # Step 2: Extract the conditional info
         with torch.no_grad():
             conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
-
-            if not getattr(self, "unconditional_dict", None):
-                unconditional_dict = self.model.text_encoder(
-                    text_prompts=[self.config.negative_prompt] * batch_size
-                )
-                unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
-                self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
-            else:
-                unconditional_dict = self.unconditional_dict
 
         # Step 3: Train the generator
         generator_loss, log_dict = self.model.generator_loss(
             image_or_video_shape=image_or_video_shape,
             conditional_dict=conditional_dict,
-            unconditional_dict=unconditional_dict,
             clean_latent=clean_latent,
             initial_latent=image_latent,
         )
@@ -348,18 +338,10 @@ class Trainer:
                 shape[0] = batch_size
 
                 conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
-                unconditional_dict = getattr(self, "unconditional_dict", None)
-                if unconditional_dict is None:
-                    unconditional_dict = self.model.text_encoder(
-                        text_prompts=[self.config.negative_prompt] * batch_size
-                    )
-                    unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
-                    self.unconditional_dict = unconditional_dict
 
                 loss, _ = self.model.generator_loss(
                     image_or_video_shape=shape,
                     conditional_dict=conditional_dict,
-                    unconditional_dict=unconditional_dict,
                     clean_latent=clean_latent,
                     initial_latent=image_latent,
                 )
