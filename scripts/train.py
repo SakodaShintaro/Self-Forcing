@@ -101,14 +101,11 @@ class Trainer:
         set_seed(seed)
 
         if not self.disable_wandb:
-            if config.wandb_key:
-                wandb.login(host=config.wandb_host or None, key=config.wandb_key)
             wandb.init(
                 config=OmegaConf.to_container(config, resolve=True),
                 name=config_name,
                 mode="online",
-                entity=config.wandb_entity or None,
-                project=config.wandb_project or "self-forcing",
+                project="self-forcing",
                 dir=run_dir,
             )
 

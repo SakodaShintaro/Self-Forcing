@@ -64,7 +64,3 @@ log_iters: 2
 gc_interval: 100
 valid_iters: 100        # 0 disables; otherwise run validate() every N train steps
 valid_batches: 16       # number of valid mini-batches averaged per validation pass
-wandb_host: ""
-wandb_key: ""
-wandb_entity: ""
-wandb_project: ""
