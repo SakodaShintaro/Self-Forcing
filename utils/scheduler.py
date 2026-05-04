@@ -26,7 +26,7 @@ class SchedulerInterface(ABC):
         self, x0: torch.Tensor, xt: torch.Tensor, timestep: torch.Tensor
     ) -> torch.Tensor:
         """
-        Convert the diffusion network's x0 prediction to noise predidction.
+        Convert the diffusion network's x0 prediction to noise prediction.
         x0: the predicted clean data with shape [B, C, H, W]
         xt: the input noisy data with shape [B, C, H, W]
         timestep: the timestep with shape [B]
@@ -49,7 +49,7 @@ class SchedulerInterface(ABC):
         self, noise: torch.Tensor, xt: torch.Tensor, timestep: torch.Tensor
     ) -> torch.Tensor:
         """
-        Convert the diffusion network's noise prediction to x0 predidction.
+        Convert the diffusion network's noise prediction to x0 prediction.
         noise: the predicted noise with shape [B, C, H, W]
         xt: the input noisy data with shape [B, C, H, W]
         timestep: the timestep with shape [B]
@@ -71,7 +71,7 @@ class SchedulerInterface(ABC):
         self, velocity: torch.Tensor, xt: torch.Tensor, timestep: torch.Tensor
     ) -> torch.Tensor:
         """
-        Convert the diffusion network's velocity prediction to x0 predidction.
+        Convert the diffusion network's velocity prediction to x0 prediction.
         velocity: the predicted noise with shape [B, C, H, W]
         xt: the input noisy data with shape [B, C, H, W]
         timestep: the timestep with shape [B]
