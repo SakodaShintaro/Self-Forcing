@@ -46,7 +46,6 @@ timestep_shift: 5.0
 
 # --- dataset ---
 # b2d_root is set per-machine via `--b2d_root` on the scripts/train.py CLI (not stored here).
-b2d_split: train
 b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
 
 # --- optimizer (LoRA-friendly LR; bump higher than full fine-tune since adapter init is identity) ---

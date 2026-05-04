@@ -156,7 +156,7 @@ class Trainer:
         # Step 3: Initialize the dataloader
         dataset = Bench2DriveLatentDataset(
             b2d_root=b2d_root,
-            split=config.b2d_split,
+            split="train",
             num_frames=config.image_or_video_shape[1],
             fixed_caption=config.b2d_caption,
         )
