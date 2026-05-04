@@ -198,7 +198,9 @@ def rollout_psnr(
         }
     )
     pipeline = CausalInferencePipeline.__new__(CausalInferencePipeline)
-    pipeline.__init__.__wrapped__ if False else None  # noqa
+    # Initialize the nn.Module dicts (_parameters / _modules / _buffers) without
+    # running CausalInferencePipeline.__init__ (which would re-load models).
+    torch.nn.Module.__init__(pipeline)
     # Manually set up pipeline state without re-loading models
     pipeline.generator = generator
     pipeline.text_encoder = None  # we use cached text_emb directly
@@ -248,8 +250,9 @@ def rollout_psnr(
             )
         finally:
             pipeline.text_encoder = original_text_encoder
-        # video: (1, T_pix, 3, H, W) in [0,1]; decode GT for comparison
-        gt_video = vae.decode_to_pixel(clean.float(), use_cache=False)
+        # video: (1, T_pix, 3, H, W) in [0,1]; decode GT for comparison.
+        # VAE was loaded as bf16, so feed bf16 latents (matches `clean`'s dtype).
+        gt_video = vae.decode_to_pixel(clean, use_cache=False)
         gt_video = (gt_video * 0.5 + 0.5).clamp(0, 1)
         # Compare only the predicted region (skip the initial-latent pixel range)
         T_pred_pix = video.shape[1] - (1 + 4 * (num_input_latents - 1))
@@ -288,11 +291,19 @@ def main() -> None:
     )
     parser.add_argument("--num_input_latents", type=int, default=3)
     parser.add_argument("--denoising_steps", type=int, nargs="+", default=[1000, 750, 500, 250])
+    parser.add_argument(
+        "--b2d_root",
+        type=str,
+        required=True,
+        help="Bench2Drive root (contains splits.json and latents/{train,valid}/). "
+        "Overrides config.b2d_root.",
+    )
     args = parser.parse_args()
 
     config = OmegaConf.load(args.config_path)
     default_config = OmegaConf.load("configs/default_config.yaml")
     config = OmegaConf.merge(default_config, config)
+    config.b2d_root = args.b2d_root
 
     device = torch.device("cuda")
     set_seed(args.seed)
