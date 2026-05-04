@@ -49,7 +49,6 @@ class Trainer:
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
         self.is_main_process = global_rank == 0
-        self.causal = config.causal
         self.disable_wandb = config.disable_wandb
 
         # use a random seed for the training
@@ -137,12 +136,6 @@ class Trainer:
             wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
             cpu_offload=getattr(config, "text_encoder_cpu_offload", False),
         )
-
-        if not config.no_visualize or config.load_raw_video:
-            self.model.vae = self.model.vae.to(
-                device=self.device,
-                dtype=torch.bfloat16 if config.mixed_precision else torch.float32,
-            )
 
         self.generator_optimizer = torch.optim.AdamW(
             [param for param in self.model.generator.parameters() if param.requires_grad],
@@ -267,20 +260,10 @@ class Trainer:
         if self.step % 20 == 0:
             torch.cuda.empty_cache()
 
-        # Step 1: Get the next batch of text prompts
+        # Step 1: Get the next batch of text prompts and precomputed latents
         text_prompts = batch["prompts"]
-        if not self.config.load_raw_video:  # precomputed latent
-            clean_latent = batch["ode_latent"][:, -1].to(device=self.device, dtype=self.dtype)
-        else:  # encode raw video to latent
-            frames = batch["frames"].to(device=self.device, dtype=self.dtype)
-            with torch.no_grad():
-                clean_latent = self.model.vae.encode_to_latent(frames).to(
-                    device=self.device, dtype=self.dtype
-                )
-        image_latent = clean_latent[
-            :,
-            0:1,
-        ]
+        clean_latent = batch["ode_latent"][:, -1].to(device=self.device, dtype=self.dtype)
+        image_latent = clean_latent[:, 0:1]
 
         batch_size = len(text_prompts)
         image_or_video_shape = list(self.config.image_or_video_shape)
@@ -420,15 +403,6 @@ class Trainer:
 
         denom = local_count.clamp(min=1.0)
         return (local_sum / denom).item()
-
-    def generate_video(self, pipeline, prompts, image=None):
-        batch_size = len(prompts)
-        sampled_noise = torch.randn([batch_size, 21, 16, 60, 104], device="cuda", dtype=self.dtype)
-        video, _ = pipeline.inference(
-            noise=sampled_noise, text_prompts=prompts, return_latents=True
-        )
-        current_video = video.permute(0, 1, 3, 4, 2).cpu().numpy() * 255.0
-        return current_video
 
     def train(self):
         max_steps = getattr(self.config, "max_steps", None)

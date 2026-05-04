@@ -30,16 +30,11 @@ lora:
 
 # --- trainer / loss ---
 max_steps: 10
-distribution_loss: causal_diffusion   # not used by trainer/diffusion.py, kept for symmetry
-denoising_loss_type: flow
 mixed_precision: true
 warp_denoising_step: false
-ts_schedule: false
 num_train_timestep: 1000
 timestep_shift: 5.0
 guidance_scale: 0.0   # we are not training a CFG distillation; loss does not use it
-teacher_forcing: false
-noise_augmentation_max_timestep: 0
 context_noise: 0   # noise level for KV-cache context refresh in CausalInferencePipeline
 
 # --- model shape ---
@@ -50,11 +45,7 @@ image_or_video_shape:
 - 60
 - 104
 num_frame_per_block: 3
-load_raw_video: false
 gradient_checkpointing: true
-i2v: false
-causal: true
-independent_first_frame: false
 
 model_kwargs:
   timestep_shift: 5.0

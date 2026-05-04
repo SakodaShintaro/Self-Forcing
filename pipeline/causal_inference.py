@@ -32,7 +32,6 @@ class CausalInferencePipeline(torch.nn.Module):
         self.kv_cache1 = None
         self.args = args
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
-        self.independent_first_frame = args.independent_first_frame
         self.local_attn_size = self.generator.model.local_attn_size
 
         print(f"KV inference with {self.num_frame_per_block} frames per block")
@@ -46,7 +45,6 @@ class CausalInferencePipeline(torch.nn.Module):
         text_prompts: List[str],
         initial_latent: Optional[torch.Tensor] = None,
         return_latents: bool = False,
-        profile: bool = False,
     ) -> torch.Tensor:
         """
         Perform inference on the given noise and text prompts.
@@ -65,17 +63,8 @@ class CausalInferencePipeline(torch.nn.Module):
                 It is normalized to be in the range [0, 1].
         """
         batch_size, num_frames, num_channels, height, width = noise.shape
-        if not self.independent_first_frame or (
-            self.independent_first_frame and initial_latent is not None
-        ):
-            # If the first frame is independent and the first frame is provided, then the number of frames in the
-            # noise should still be a multiple of num_frame_per_block
-            assert num_frames % self.num_frame_per_block == 0
-            num_blocks = num_frames // self.num_frame_per_block
-        else:
-            # Using a [1, 4, 4, 4, 4, 4, ...] model to generate a video without image conditioning
-            assert (num_frames - 1) % self.num_frame_per_block == 0
-            num_blocks = (num_frames - 1) // self.num_frame_per_block
+        assert num_frames % self.num_frame_per_block == 0
+        num_blocks = num_frames // self.num_frame_per_block
         num_input_frames = initial_latent.shape[1] if initial_latent is not None else 0
         num_output_frames = num_frames + num_input_frames  # add the initial latent frames
         conditional_dict = self.text_encoder(text_prompts=text_prompts)
@@ -85,19 +74,6 @@ class CausalInferencePipeline(torch.nn.Module):
             device=noise.device,
             dtype=noise.dtype,
         )
-
-        # Set up profiling if requested
-        if profile:
-            init_start = torch.cuda.Event(enable_timing=True)
-            init_end = torch.cuda.Event(enable_timing=True)
-            diffusion_start = torch.cuda.Event(enable_timing=True)
-            diffusion_end = torch.cuda.Event(enable_timing=True)
-            vae_start = torch.cuda.Event(enable_timing=True)
-            vae_end = torch.cuda.Event(enable_timing=True)
-            block_times = []
-            block_start = torch.cuda.Event(enable_timing=True)
-            block_end = torch.cuda.Event(enable_timing=True)
-            init_start.record()
 
         # Step 1: Initialize KV cache to all zeros
         if self.kv_cache1 is None:
@@ -121,25 +97,9 @@ class CausalInferencePipeline(torch.nn.Module):
         # Step 2: Cache context feature
         current_start_frame = 0
         if initial_latent is not None:
+            assert num_input_frames % self.num_frame_per_block == 0
+            num_input_blocks = num_input_frames // self.num_frame_per_block
             timestep = torch.ones([batch_size, 1], device=noise.device, dtype=torch.int64) * 0
-            if self.independent_first_frame:
-                # Assume num_input_frames is 1 + self.num_frame_per_block * num_input_blocks
-                assert (num_input_frames - 1) % self.num_frame_per_block == 0
-                num_input_blocks = (num_input_frames - 1) // self.num_frame_per_block
-                output[:, :1] = initial_latent[:, :1]
-                self.generator(
-                    noisy_image_or_video=initial_latent[:, :1],
-                    conditional_dict=conditional_dict,
-                    timestep=timestep * 0,
-                    kv_cache=self.kv_cache1,
-                    crossattn_cache=self.crossattn_cache,
-                    current_start=current_start_frame * self.frame_seq_length,
-                )
-                current_start_frame += 1
-            else:
-                # Assume num_input_frames is self.num_frame_per_block * num_input_blocks
-                assert num_input_frames % self.num_frame_per_block == 0
-                num_input_blocks = num_input_frames // self.num_frame_per_block
 
             for _ in range(num_input_blocks):
                 current_ref_latents = initial_latent[
@@ -158,19 +118,8 @@ class CausalInferencePipeline(torch.nn.Module):
                 )
                 current_start_frame += self.num_frame_per_block
 
-        if profile:
-            init_end.record()
-            torch.cuda.synchronize()
-            diffusion_start.record()
-
         # Step 3: Temporal denoising loop
-        all_num_frames = [self.num_frame_per_block] * num_blocks
-        if self.independent_first_frame and initial_latent is None:
-            all_num_frames = [1] + all_num_frames
-        for current_num_frames in all_num_frames:
-            if profile:
-                block_start.record()
-
+        for current_num_frames in [self.num_frame_per_block] * num_blocks:
             noisy_input = noise[
                 :,
                 current_start_frame - num_input_frames : current_start_frame
@@ -233,47 +182,12 @@ class CausalInferencePipeline(torch.nn.Module):
                 current_start=current_start_frame * self.frame_seq_length,
             )
 
-            if profile:
-                block_end.record()
-                torch.cuda.synchronize()
-                block_time = block_start.elapsed_time(block_end)
-                block_times.append(block_time)
-
             # Step 3.4: update the start and end frame indices
             current_start_frame += current_num_frames
-
-        if profile:
-            # End diffusion timing and synchronize CUDA
-            diffusion_end.record()
-            torch.cuda.synchronize()
-            diffusion_time = diffusion_start.elapsed_time(diffusion_end)
-            init_time = init_start.elapsed_time(init_end)
-            vae_start.record()
 
         # Step 4: Decode the output
         video = self.vae.decode_to_pixel(output, use_cache=False)
         video = (video * 0.5 + 0.5).clamp(0, 1)
-
-        if profile:
-            # End VAE timing and synchronize CUDA
-            vae_end.record()
-            torch.cuda.synchronize()
-            vae_time = vae_start.elapsed_time(vae_end)
-            total_time = init_time + diffusion_time + vae_time
-
-            print("Profiling results:")
-            print(
-                f"  - Initialization/caching time: {init_time:.2f} ms ({100 * init_time / total_time:.2f}%)"
-            )
-            print(
-                f"  - Diffusion generation time: {diffusion_time:.2f} ms ({100 * diffusion_time / total_time:.2f}%)"
-            )
-            for i, block_time in enumerate(block_times):
-                print(
-                    f"    - Block {i} generation time: {block_time:.2f} ms ({100 * block_time / diffusion_time:.2f}% of diffusion)"
-                )
-            print(f"  - VAE decoding time: {vae_time:.2f} ms ({100 * vae_time / total_time:.2f}%)")
-            print(f"  - Total time: {total_time:.2f} ms")
 
         if return_latents:
             return video, output
