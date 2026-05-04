@@ -5,7 +5,7 @@ import time
 import wandb
 from omegaconf import OmegaConf
 
-from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer
+from trainer import DiffusionTrainer
 
 
 def _set_distributed_defaults() -> None:
@@ -82,14 +82,7 @@ def main():
     config.wandb_save_dir = args.logdir
     config.disable_wandb = args.disable_wandb
 
-    if config.trainer == "diffusion":
-        trainer = DiffusionTrainer(config)
-    elif config.trainer == "gan":
-        trainer = GANTrainer(config)
-    elif config.trainer == "ode":
-        trainer = ODETrainer(config)
-    elif config.trainer == "score_distillation":
-        trainer = ScoreDistillationTrainer(config)
+    trainer = DiffusionTrainer(config)
     trainer.train()
 
     wandb.finish()
