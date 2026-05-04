@@ -1,11 +1,11 @@
 """Encode bench2drive episodes (rgb_front) through Wan VAE -> save per-episode latent .pt files.
 
 Inputs/outputs are anchored under --src:
-  splits  : <src>/splits.json   (produced by scripts/b2d_split.py)
+  splits  : <src>/splits.json   (produced by scripts/split.py)
   latents : <src>/latents/{train,valid}/<episode>.pt
 
 Run:
-  uv run python scripts/b2d_encode_latents.py --src /path/to/bench2drive
+  uv run python scripts/encode_latents.py --src /path/to/bench2drive
 Existing .pt files are skipped so it is safe to interrupt and resume.
 """
 

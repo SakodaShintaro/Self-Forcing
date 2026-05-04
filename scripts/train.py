@@ -2,15 +2,18 @@ import argparse
 import gc
 import logging
 import os
+import sys
 import time
+from pathlib import Path
 
 import torch
 import wandb
 from omegaconf import OmegaConf
 
-from model import CausalDiffusion
-from utils.b2d_dataset import Bench2DriveLatentDataset
-from utils.misc import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from model.training_model import CausalDiffusion  # noqa: E402
+from utils.b2d_dataset import Bench2DriveLatentDataset  # noqa: E402
+from utils.misc import (  # noqa: E402
     load_generator_state_dict,
     resolve_checkpoint_path,
     set_seed,

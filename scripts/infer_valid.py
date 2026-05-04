@@ -18,10 +18,13 @@ single noise block is denoised. The K context latents come straight from
 kept and concatenated with the GT context for a single VAE decode at the end.
 
 Run:
-  uv run python scripts/b2d_infer_valid.py \
-    --config_path configs/b2d_finetune.yaml --tag baseline
-  uv run python scripts/b2d_infer_valid.py \
+  uv run python scripts/infer_valid.py \
     --config_path configs/b2d_finetune.yaml \
+    --b2d_root /path/to/bench2drive \
+    --tag baseline
+  uv run python scripts/infer_valid.py \
+    --config_path configs/b2d_finetune.yaml \
+    --b2d_root /path/to/bench2drive \
     --checkpoint_path logs/b2d_finetune/checkpoint_model_001000/model.pt \
     --tag step_001000
 """
@@ -45,7 +48,7 @@ from torchvision.io import write_video
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pipeline.causal_inference import CausalInferencePipeline  # noqa: E402
+from model.inference_model import CausalInferencePipeline  # noqa: E402
 from utils.misc import load_generator_state_dict, resolve_checkpoint_path, set_seed  # noqa: E402
 
 _INFERENCE_KEY_ORDER = ("generator_ema", "generator", "model")

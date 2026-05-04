@@ -1,9 +1,9 @@
 # Fine-tune Self-Forcing on bench2drive latents (single GPU).
 # Pre-requisites (anchored at b2d_root):
-#   1. scripts/b2d_split.py --src <b2d_root>          -> <b2d_root>/splits.json
-#   2. scripts/b2d_encode_latents.py --src <b2d_root> -> <b2d_root>/latents/{train,valid}/<episode>.pt
+#   1. scripts/split.py --src <b2d_root>          -> <b2d_root>/splits.json
+#   2. scripts/encode_latents.py --src <b2d_root> -> <b2d_root>/latents/{train,valid}/<episode>.pt
 # Launch:
-#   uv run python train.py \
+#   uv run python scripts/train.py \
 #       --config_path configs/b2d_finetune.yaml \
 #       --root_dir /path/to/results \
 #       --b2d_root <b2d_root>
@@ -45,7 +45,7 @@ gradient_checkpointing: true
 timestep_shift: 5.0
 
 # --- dataset ---
-# b2d_root is set per-machine via `--b2d_root` on the train.py CLI (not stored here).
+# b2d_root is set per-machine via `--b2d_root` on the scripts/train.py CLI (not stored here).
 b2d_split: train
 b2d_caption: ""   # fixed empty caption (no CFG, no per-clip conditioning)
 

@@ -8,7 +8,7 @@ This repository is a stripped-down fork of <https://github.com/guandeh17/Self-Fo
 - **bench2drive-specific dataset**: `utils/b2d_dataset.Bench2DriveLatentDataset` consumes precomputed per-episode latent tensors and serves random fixed-length windows.
 - **LoRA is mandatory.** Training fails fast unless `lora.enabled: true` is set in the config. Saved checkpoints contain only trainable (LoRA + EMA) parameters, so each `model.pt` is a few MB instead of ~11 GB.
 - **In-loop validation.** Every `valid_iters` train steps we run a fixed number of forward-only `generator_loss` evaluations on the valid split (with frozen RNG for comparability) and log `val/loss` to wandb / stdout.
-- **`train.py` is self-contained**. The trainer class moved out of `trainer/` into `train.py` and the trainer dispatch was removed.
+- **`scripts/train.py` is self-contained**. The trainer class moved out of `trainer/` into `scripts/train.py` and the trainer dispatch was removed.
 - **Single config**. `configs/default_config.yaml` was inlined into `configs/b2d_finetune.yaml`.
 - **Wan minimal subset**. Dropped `wan/{configs,distributed,utils,image2video.py,text2video.py}` and `wan/modules/{clip,xlm_roberta}.py`; the kept subset is `wan/modules/{attention, causal_model, model, t5, tokenizers, vae}.py`.
 - Dropped `inference.py` / `demo.py` / `demo_utils/` (Gradio demo + low-memory swapping helpers used only by the demo).
@@ -30,9 +30,9 @@ The expected layout under `<b2d_root>` (default in this repo: `/home/sakoda/data
 
 ```text
 <b2d_root>/
-├── splits.json                              # produced by scripts/b2d_split.py
+├── splits.json                              # produced by scripts/split.py
 ├── latents/
-│   ├── train/<episode>.pt                   # produced by scripts/b2d_encode_latents.py
+│   ├── train/<episode>.pt                   # produced by scripts/encode_latents.py
 │   └── valid/<episode>.pt
 └── <episode>/                               # raw bench2drive episodes
     └── camera/rgb_front/*.jpg
@@ -41,7 +41,7 @@ The expected layout under `<b2d_root>` (default in this repo: `/home/sakoda/data
 ### 1. Build the train/valid split
 
 ```bash
-uv run python scripts/b2d_split.py --src <b2d_root>
+uv run python scripts/split.py --src <b2d_root>
 ```
 
 Episodes are partitioned deterministically by Route ID hash. Output: `<b2d_root>/splits.json`.
@@ -49,7 +49,7 @@ Episodes are partitioned deterministically by Route ID hash. Output: `<b2d_root>
 ### 2. Pre-encode VAE latents (one-time)
 
 ```bash
-uv run python scripts/b2d_encode_latents.py --src <b2d_root>
+uv run python scripts/encode_latents.py --src <b2d_root>
 ```
 
 Runs the Wan VAE encoder over every episode's `rgb_front/*.jpg` stream and dumps a `(T_lat, 16, 60, 104)` bf16 tensor per episode under `<b2d_root>/latents/{train,valid}/`. Existing files are skipped, so the script is resumable.
@@ -57,7 +57,7 @@ Runs the Wan VAE encoder over every episode's `rgb_front/*.jpg` stream and dumps
 ### 3. LoRA fine-tune
 
 ```bash
-uv run python train.py \
+uv run python scripts/train.py \
     --config_path configs/b2d_finetune.yaml \
     --b2d_root <b2d_root> \
     --root_dir /path/to/results
@@ -80,7 +80,7 @@ Key knobs in [`configs/b2d_finetune.yaml`](configs/b2d_finetune.yaml):
 ### 4. Evaluate a checkpoint
 
 ```bash
-uv run python scripts/b2d_infer_valid.py \
+uv run python scripts/infer_valid.py \
     --config_path configs/b2d_finetune.yaml \
     --b2d_root <b2d_root> \
     --checkpoint_path <run_dir>/checkpoint_model_<step>/model.pt

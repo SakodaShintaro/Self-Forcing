@@ -1,8 +1,8 @@
 """Random-window dataset over precomputed bench2drive episode latents.
 
 Layout (anchored at b2d_root, the bench2drive raw-data directory):
-    <b2d_root>/splits.json                                 (from b2d_split.py)
-    <b2d_root>/latents/{train,valid}/<episode>.pt          (from b2d_encode_latents.py)
+    <b2d_root>/splits.json                                 (from scripts/split.py)
+    <b2d_root>/latents/{train,valid}/<episode>.pt          (from scripts/encode_latents.py)
 
 Each episode .pt file stores a (T_lat, 16, 60, 104) bf16 tensor. Each __getitem__
 samples a contiguous `num_frames`-latent window from a random episode-and-offset.
@@ -69,7 +69,7 @@ class Bench2DriveLatentDataset(Dataset):
         if len(self.episodes) == 0:
             raise RuntimeError(
                 f"No usable latent .pt files (>= {num_frames} frames) for split={split} "
-                f"in {self.latent_dir}. Run scripts/b2d_encode_latents.py first."
+                f"in {self.latent_dir}. Run scripts/encode_latents.py first."
             )
 
     def __len__(self) -> int:
