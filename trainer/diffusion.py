@@ -9,6 +9,7 @@ import wandb
 from omegaconf import OmegaConf
 
 from model import CausalDiffusion
+from utils.b2d_dataset import Bench2DriveLatentDataset
 from utils.dataset import ShardingLMDBDataset, cycle
 from utils.distributed import EMA_FSDP, barrier, fsdp_state_dict, fsdp_wrap, launch_distributed_job
 from utils.misc import resolve_checkpoint_path, set_seed
@@ -135,7 +136,6 @@ class Trainer:
         # Step 3: Initialize the dataloader
         dataset_type = getattr(config, "dataset_type", "lmdb")
         if dataset_type == "b2d_latent":
-            from utils.b2d_dataset import Bench2DriveLatentDataset
             dataset = Bench2DriveLatentDataset(
                 b2d_root=config.b2d_root,
                 split=config.b2d_split,
@@ -155,6 +155,37 @@ class Trainer:
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
         self.dataloader = cycle(dataloader)
+
+        # Step 3.1: Optional validation loader (b2d_latent only).
+        # Driven by config.valid_iters (0 disables) and config.valid_batches.
+        self.valid_iters = int(getattr(config, "valid_iters", 0) or 0)
+        self.valid_batches = int(getattr(config, "valid_batches", 0) or 0)
+        self.valid_dataloader = None
+        if (
+            dataset_type == "b2d_latent"
+            and self.valid_iters > 0
+            and self.valid_batches > 0
+        ):
+            valid_dataset = Bench2DriveLatentDataset(
+                b2d_root=config.b2d_root,
+                split="valid",
+                num_frames=config.image_or_video_shape[1],
+                fixed_caption=config.b2d_caption,
+            )
+            valid_sampler = torch.utils.data.distributed.DistributedSampler(
+                valid_dataset, shuffle=False, drop_last=False
+            )
+            self.valid_dataloader = torch.utils.data.DataLoader(
+                valid_dataset,
+                batch_size=config.batch_size,
+                sampler=valid_sampler,
+                num_workers=2,
+            )
+            if dist.get_rank() == 0:
+                print(
+                    f"VALID DATASET SIZE {len(valid_dataset)} "
+                    f"(valid_batches={self.valid_batches} every {self.valid_iters} steps)"
+                )
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
@@ -290,6 +321,74 @@ class Trainer:
             else:
                 self.generator_ema.update(self.model.generator)
 
+    @torch.no_grad()
+    def validate(self):
+        """Run a fixed number of forward-only generator_loss evaluations on the
+        valid split and return the cross-rank mean loss (or None if disabled)."""
+        if self.valid_dataloader is None:
+            return None
+
+        self.model.generator.eval()
+        # Reproducible val sampling: fix RNG so val numbers are comparable across
+        # train steps (generator_loss internally samples timesteps and noise).
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state(self.device)
+        torch.manual_seed(self.config.seed + 1)
+        torch.cuda.manual_seed(self.config.seed + 1)
+
+        losses: list[torch.Tensor] = []
+        image_or_video_shape = list(self.config.image_or_video_shape)
+        try:
+            for i, batch in enumerate(self.valid_dataloader):
+                if i >= self.valid_batches:
+                    break
+                text_prompts = batch["prompts"]
+                clean_latent = batch["ode_latent"][:, -1].to(
+                    device=self.device, dtype=self.dtype)
+                image_latent = clean_latent[:, 0:1, ]
+                batch_size = len(text_prompts)
+                shape = list(image_or_video_shape)
+                shape[0] = batch_size
+
+                conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
+                unconditional_dict = getattr(self, "unconditional_dict", None)
+                if unconditional_dict is None:
+                    unconditional_dict = self.model.text_encoder(
+                        text_prompts=[self.config.negative_prompt] * batch_size)
+                    unconditional_dict = {
+                        k: v.detach() for k, v in unconditional_dict.items()
+                    }
+                    self.unconditional_dict = unconditional_dict
+
+                loss, _ = self.model.generator_loss(
+                    image_or_video_shape=shape,
+                    conditional_dict=conditional_dict,
+                    unconditional_dict=unconditional_dict,
+                    clean_latent=clean_latent,
+                    initial_latent=image_latent,
+                )
+                losses.append(loss.detach().float())
+        finally:
+            torch.set_rng_state(cpu_rng)
+            torch.cuda.set_rng_state(cuda_rng, self.device)
+            self.model.generator.train()
+
+        local_count = torch.tensor(
+            [float(len(losses))], device=self.device, dtype=torch.float32
+        )
+        local_sum = (
+            torch.stack(losses).sum() if losses
+            else torch.zeros((), device=self.device, dtype=torch.float32)
+        )
+        local_sum = local_sum.float().reshape(1)
+
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(local_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+
+        denom = local_count.clamp(min=1.0)
+        return (local_sum / denom).item()
+
     def generate_video(self, pipeline, prompts, image=None):
         batch_size = len(prompts)
         sampled_noise = torch.randn(
@@ -312,6 +411,20 @@ class Trainer:
                 torch.cuda.empty_cache()
                 self.save()
                 torch.cuda.empty_cache()
+
+            if (
+                self.valid_dataloader is not None
+                and self.step % self.valid_iters == 0
+            ):
+                torch.cuda.empty_cache()
+                val_loss = self.validate()
+                torch.cuda.empty_cache()
+                if val_loss is not None and self.is_main_process:
+                    print(f"step={self.step} val_loss={val_loss:.4f}", flush=True)
+                    if not self.disable_wandb:
+                        wandb.log({"val/loss": val_loss}, step=self.step)
+                # Don't let validation time pollute the next iteration's iter_time.
+                self.previous_time = time.time()
 
             barrier()
             if self.is_main_process:

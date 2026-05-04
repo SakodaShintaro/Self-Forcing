@@ -86,6 +86,8 @@ ema_start_step: 200
 # --- logging / saving ---
 log_iters: 200
 gc_interval: 100
+valid_iters: 100        # 0 disables; otherwise run validate() every N train steps
+valid_batches: 16       # number of valid mini-batches averaged per validation pass
 no_save: false
 no_visualize: true   # disable rollout visualization on first run
 disable_wandb: true
