@@ -42,6 +42,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 from torchvision import transforms
 from torchvision.io import write_video
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline.causal_inference import CausalInferencePipeline  # noqa: E402
@@ -166,8 +167,12 @@ def main() -> None:
     parser.add_argument("--config_path", type=str, required=True)
     parser.add_argument("--checkpoint_path", type=str, default=None,
                         help="Optional LoRA fine-tune ckpt. None = base self_forcing_dmd.pt only.")
-    parser.add_argument("--out_root", type=Path, default=Path("/home/sakoda/data/b2d_result"))
-    parser.add_argument("--tag", type=str, required=True,
+    parser.add_argument("--b2d_root", type=str, required=True,
+                        help="Bench2Drive root (contains splits.json and latents/valid/).")
+    parser.add_argument("--out_root", type=Path, default=None,
+                        help="Output root. Required only when --checkpoint_path is omitted; "
+                             "with a checkpoint, results are saved next to it.")
+    parser.add_argument("--tag", type=str, default="eval",
                         help="Suffix appended to the timestamped output directory name.")
     parser.add_argument("--num_episodes", type=int, default=None,
                         help="Limit to first N valid episodes (default: all).")
@@ -182,13 +187,19 @@ def main() -> None:
     args = parser.parse_args()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = args.out_root / f"{stamp}_{args.tag}"
+    if args.checkpoint_path:
+        out_dir = Path(args.checkpoint_path).parent / f"{stamp}_{args.tag}"
+    else:
+        if args.out_root is None:
+            parser.error("--out_root is required when --checkpoint_path is not given.")
+        out_dir = args.out_root / f"{stamp}_{args.tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     config = OmegaConf.merge(
         OmegaConf.load("configs/default_config.yaml"),
         OmegaConf.load(args.config_path),
     )
+    config.b2d_root = args.b2d_root
     config.denoising_step_list = [1000, 750, 500, 250]
     config.warp_denoising_step = True
 
@@ -249,14 +260,16 @@ def main() -> None:
     pred_lat = fpb  # one block per inference call
 
     summary = []
-    for i, ep in enumerate(episodes):
+    ep_pbar = tqdm(episodes, desc="episodes", unit="ep")
+    for i, ep in enumerate(ep_pbar):
+        ep_pbar.set_postfix_str(ep, refresh=False)
         latent = torch.load(
             latent_dir / f"{ep}.pt", map_location="cpu", weights_only=True
         )  # (T, 16, 60, 104), bf16
         T_lat = latent.shape[0]
         T_blocks = T_lat // fpb
         if T_blocks < K + 1:
-            print(f"[{i+1}/{len(episodes)}] {ep}: SKIP (T_blocks={T_blocks} < K+1={K+1})")
+            tqdm.write(f"[{i+1}/{len(episodes)}] {ep}: SKIP (T_blocks={T_blocks} < K+1={K+1})")
             continue
         usable_M = min(M, T_blocks - K)
 
@@ -265,7 +278,9 @@ def main() -> None:
         # *ground truth* blocks. KV cache is auto-reset per pipeline.inference().
         t0 = time.time()
         pred_block_latents: list[torch.Tensor] = []
-        for j in range(usable_M):
+        block_pbar = tqdm(range(usable_M), desc=f"  blocks ({ep[:30]})",
+                          unit="blk", leave=False)
+        for j in block_pbar:
             ctx_start = j * fpb
             ctx_end = ctx_start + K_lat
             initial_latent = latent[ctx_start:ctx_end].unsqueeze(0).to(
@@ -283,6 +298,7 @@ def main() -> None:
             )
             # all_lat: (1, K_lat + pred_lat, 16, 60, 104). Keep only the predicted block.
             pred_block_latents.append(all_lat[:, -pred_lat:].cpu())
+        block_pbar.close()
 
         # Decode each predicted block with **GT** as the VAE decoder cache prefix
         # (not the previously-predicted block), so that decode-time temporal
@@ -335,7 +351,13 @@ def main() -> None:
         write_video(str(out_dir / f"{ep}_compare.mp4"), compare, fps=args.fps)
 
         dt = time.time() - t0
-        print(
+        running = [s["mean_psnr_predicted_blocks_db"] for s in summary] + [pred_only_psnr]
+        running_mean = sum(running) / len(running)
+        ep_pbar.set_postfix(
+            ep=ep[:30], psnr=f"{pred_only_psnr:.2f}dB",
+            avg=f"{running_mean:.2f}dB", dt=f"{dt:.1f}s",
+        )
+        tqdm.write(
             f"[{i+1}/{len(episodes)}] {ep}: T_blocks={T_blocks} K={K} M={usable_M} "
             f"pred_PSNR={pred_only_psnr:.2f}dB dt={dt:.1f}s"
         )
