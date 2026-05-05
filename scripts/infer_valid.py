@@ -13,9 +13,15 @@ latent stream and ask the model to predict the *next* block from that context
 
 Each prediction is an independent CausalInferencePipeline call: KV cache is
 reset, the K context blocks are pushed in (Step-2 timestep=0 path), and a
-single noise block is denoised. The K context latents come straight from
-`<b2d_root>/latents/valid/<episode>.pt`; only the predicted block latents are
-kept and concatenated with the GT context for a single VAE decode at the end.
+single noise block is denoised. Predicted block latents are concatenated with
+the GT context for a single VAE decode at the end.
+
+`--source` controls where the GT latent stream comes from:
+  latent (default): load precomputed `<b2d_root>/latents/valid/<ep>.pt` files
+                    (produced by scripts/encode_latents.py).
+  pixel           : load raw `<b2d_root>/<ep>/camera/rgb_front/*.jpg` and encode
+                    them through the Wan VAE on the fly. Slower but does not
+                    require a prior encode pass.
 
 Run:
   uv run python scripts/infer_valid.py \
@@ -26,7 +32,8 @@ Run:
     --config_path configs/b2d_finetune.yaml \
     --b2d_root /path/to/bench2drive \
     --checkpoint_path logs/b2d_finetune/checkpoint_model_001000/model.pt \
-    --tag step_001000
+    --source pixel \
+    --tag from_pixel
 """
 
 from __future__ import annotations
@@ -100,6 +107,13 @@ def parse_args() -> argparse.Namespace:
         default=6,
         help="M: how many sliding predictions to make per episode "
         "(K+M total decoded blocks; default 1+6 = 7 blocks = 21 latents).",
+    )
+    parser.add_argument(
+        "--source",
+        choices=("latent", "pixel"),
+        default="latent",
+        help="latent: read precomputed <b2d_root>/latents/valid/*.pt. "
+        "pixel: read raw rgb_front/*.jpg and encode via Wan VAE on the fly.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -212,6 +226,62 @@ def _side_by_side(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return torch.cat([left[:T], right[:T]], dim=2)
 
 
+def _encode_episode_to_latent(episode_dir: Path, vae, device: torch.device) -> torch.Tensor | None:
+    """Read all rgb_front jpgs for an episode, normalise to [-1, 1], and encode
+    through the Wan VAE. Returns (T_lat, 16, 60, 104) bf16 on CPU, or None if
+    the episode has no usable frames.
+
+    Mirrors scripts/encode_latents.py: pixel frame count must be 1 + 4*N for the
+    encoder, so frames beyond that are dropped.
+    """
+    rgb_dir = episode_dir / "camera" / "rgb_front"
+    paths = sorted(rgb_dir.glob("*.jpg"))
+    if not paths:
+        return None
+    transform = transforms.Compose(
+        [
+            transforms.Resize((480, 832)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5] * 3, [0.5] * 3),  # [0,1] -> [-1,1]
+        ]
+    )
+    frames = [transform(Image.open(p).convert("RGB")) for p in paths]
+    pixels = torch.stack(frames, dim=1).unsqueeze(0)  # (1, 3, T, H, W)
+    pixels = pixels.to(device=device, dtype=torch.bfloat16)
+
+    T = pixels.shape[2]
+    T_eff = 1 + 4 * ((T - 1) // 4)
+    if T_eff < 1:
+        return None
+    if T_eff != T:
+        pixels = pixels[:, :, :T_eff]
+
+    latent = vae.encode_to_latent(pixels)  # (1, T_lat, 16, 60, 104) float32
+    return latent.squeeze(0).to(torch.bfloat16).cpu().contiguous()
+
+
+def _list_episodes(b2d_root: Path, source: str) -> list[str]:
+    """Episodes that have the inputs required by the chosen source."""
+    splits = json.load(open(b2d_root / "splits.json"))
+    valid = splits["valid"]
+    if source == "latent":
+        latent_dir = b2d_root / "latents" / "valid"
+        return [ep for ep in valid if (latent_dir / f"{ep}.pt").exists()]
+    # source == "pixel"
+    return [ep for ep in valid if (b2d_root / ep / "camera" / "rgb_front").is_dir()]
+
+
+def _load_episode_latent(
+    b2d_root: Path, ep: str, source: str, vae, device: torch.device
+) -> torch.Tensor:
+    """Return the GT latent stream for one episode. Shape (T_lat, 16, 60, 104) bf16 on CPU."""
+    if source == "latent":
+        return torch.load(
+            b2d_root / "latents" / "valid" / f"{ep}.pt", map_location="cpu", weights_only=True
+        )
+    return _encode_episode_to_latent(b2d_root / ep, vae, device)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -279,14 +349,12 @@ def main() -> None:
     pipeline.text_encoder = _CachedTextEncoder(cached_text, device=device)
     torch.cuda.empty_cache()
 
-    # Discover valid episodes with precomputed latents
+    # Discover valid episodes for the chosen source.
     b2d_root = Path(args.b2d_root)
-    splits = json.load(open(b2d_root / "splits.json"))
-    latent_dir = b2d_root / "latents" / "valid"
-    episodes = [ep for ep in splits["valid"] if (latent_dir / f"{ep}.pt").exists()]
+    episodes = _list_episodes(b2d_root, args.source)
     if args.num_episodes is not None:
         episodes = episodes[: args.num_episodes]
-    print(f"valid episodes to infer: {len(episodes)}")
+    print(f"valid episodes to infer: {len(episodes)} (source={args.source})")
 
     K = args.num_context_blocks
     M = args.num_pred_blocks
@@ -298,9 +366,10 @@ def main() -> None:
     ep_pbar = tqdm(episodes, desc="episodes", unit="ep")
     for i, ep in enumerate(ep_pbar):
         ep_pbar.set_postfix_str(ep, refresh=False)
-        latent = torch.load(
-            latent_dir / f"{ep}.pt", map_location="cpu", weights_only=True
-        )  # (T, 16, 60, 104), bf16
+        latent = _load_episode_latent(b2d_root, ep, args.source, pipeline.vae, device)
+        if latent is None:
+            tqdm.write(f"[{i + 1}/{len(episodes)}] {ep}: SKIP (no usable input frames)")
+            continue
         T_lat = latent.shape[0]
         T_blocks = T_lat // fpb
         if T_blocks < K + 1:
@@ -413,6 +482,7 @@ def main() -> None:
         json.dump(
             {
                 "tag": args.tag,
+                "source": args.source,
                 "checkpoint_path": args.checkpoint_path,
                 "num_context_blocks": K,
                 "num_pred_blocks": M,
