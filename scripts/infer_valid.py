@@ -420,7 +420,7 @@ def main() -> None:
         for j in range(usable_M):
             n_gt_lat = (K + j) * fpb  # GT latents preceding this predicted block
             seq = torch.cat(
-                [latent[:n_gt_lat].unsqueeze(0), pred_block_latents[j]],
+                [latent[max(0, n_gt_lat - K_lat) : n_gt_lat].unsqueeze(0), pred_block_latents[j]],
                 dim=1,
             ).to(device=device, dtype=torch.bfloat16)
             decoded = _decode_latent_to_uint8(pipeline, seq)
