@@ -27,13 +27,12 @@ Run:
   uv run python scripts/infer_valid.py \
     --config_path configs/b2d_finetune.yaml \
     --b2d_root /path/to/bench2drive \
-    --tag baseline
+
   uv run python scripts/infer_valid.py \
     --config_path configs/b2d_finetune.yaml \
     --b2d_root /path/to/bench2drive \
     --checkpoint_path logs/b2d_finetune/checkpoint_model_001000/model.pt \
     --source pixel \
-    --tag from_pixel
 """
 
 from __future__ import annotations
@@ -82,12 +81,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output root. Required only when --checkpoint_path is omitted; "
         "with a checkpoint, results are saved next to it.",
-    )
-    parser.add_argument(
-        "--tag",
-        type=str,
-        default="eval",
-        help="Suffix appended to the timestamped output directory name.",
     )
     parser.add_argument(
         "--num_episodes",
@@ -302,9 +295,9 @@ def main() -> None:
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.checkpoint_path:
-        out_dir = Path(args.checkpoint_path).parent / f"{stamp}_{args.tag}"
+        out_dir = Path(args.checkpoint_path).parent / f"{stamp}"
     else:
-        out_dir = args.out_root / f"{stamp}_{args.tag}"
+        out_dir = args.out_root / f"{stamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     config = OmegaConf.load(args.config_path)
@@ -496,7 +489,6 @@ def main() -> None:
     with open(out_dir / "summary.json", "w") as f:
         json.dump(
             {
-                "tag": args.tag,
                 "source": args.source,
                 "checkpoint_path": args.checkpoint_path,
                 "num_context_blocks": K,
