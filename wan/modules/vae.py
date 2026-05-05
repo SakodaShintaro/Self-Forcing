@@ -516,54 +516,41 @@ class WanVAE_(nn.Module):
         )
         self.clear_cache()
 
-    def forward(self, x):
-        mu, log_var = self.encode(x)
-        z = self.reparameterize(mu, log_var)
-        x_recon = self.decode(z)
-        return x_recon, mu, log_var
+    def encode(self, x, scale, cache):
+        """Causal 3D-conv encode.
 
-    def encode(self, x, scale, use_cache=False):
-        # use_cache=False (default): standalone encode, 1+4+4+... chunking, cache cleared.
-        # use_cache=True: streaming. Caller is responsible for clear_cache() before the first
-        #   call; the encoder auto-detects init vs continuation by inspecting the feat_map and
-        #   uses the 1+4*N pattern for the seed call and 4*N pattern for subsequent calls.
-        if not use_cache:
-            self.clear_cache()
+        cache: caller-owned encoder feat_map (use ``make_encoder_cache()`` to
+            allocate). All-None entries → seed call (1+4*N input frames).
+            Populated entries → streaming continuation (4*N input frames). The
+            list is mutated in place.
+        """
+        is_init = cache[0] is None
+
         t = x.shape[2]
-        is_init = (not use_cache) or (self._enc_feat_map[0] is None)
         if is_init:
             assert (t - 1) % 4 == 0, f"first encode requires 1+4*N frames, got {t}"
             iter_ = 1 + (t - 1) // 4
             # 对encode输入的x，按时间拆分为1、4、4、4....
             for i in range(iter_):
-                self._enc_conv_idx = [0]
-                if i == 0:
-                    out = self.encoder(
-                        x[:, :, :1, :, :],
-                        feat_cache=self._enc_feat_map,
-                        feat_idx=self._enc_conv_idx,
-                    )
-                else:
-                    out_ = self.encoder(
-                        x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :],
-                        feat_cache=self._enc_feat_map,
-                        feat_idx=self._enc_conv_idx,
-                    )
-                    out = torch.cat([out, out_], 2)
+                conv_idx = [0]
+                slice_ = x[:, :, :1, :, :] if i == 0 else x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :]
+                chunk = self.encoder(slice_, feat_cache=cache, feat_idx=conv_idx)
+                out = chunk if i == 0 else torch.cat([out, chunk], 2)
         else:
             assert t % 4 == 0, f"streaming continuation requires 4*N frames, got {t}"
             n_chunks = t // 4
             chunks = []
             for i in range(n_chunks):
-                self._enc_conv_idx = [0]
+                conv_idx = [0]
                 chunks.append(
                     self.encoder(
                         x[:, :, 4 * i : 4 * (i + 1), :, :],
-                        feat_cache=self._enc_feat_map,
-                        feat_idx=self._enc_conv_idx,
+                        feat_cache=cache,
+                        feat_idx=conv_idx,
                     )
                 )
             out = torch.cat(chunks, 2)
+
         mu, log_var = self.conv1(out).chunk(2, dim=1)
         if isinstance(scale[0], torch.Tensor):
             mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(
@@ -571,9 +558,15 @@ class WanVAE_(nn.Module):
             )
         else:
             mu = (mu - scale[0]) * scale[1]
-        if not use_cache:
-            self.clear_cache()
         return mu
+
+    def make_encoder_cache(self):
+        """Allocate a fresh streaming encoder cache (all-None entries).
+
+        Pass the returned list to ``encode(..., cache=...)`` to start a new
+        streaming session; reuse the same list across subsequent calls.
+        """
+        return [None] * self._enc_conv_num
 
     def decode(self, z, scale):
         self.clear_cache()
@@ -618,13 +611,6 @@ class WanVAE_(nn.Module):
                 )
                 out = torch.cat([out, out_], 2)
         return out
-
-    def sample(self, imgs, deterministic=False):
-        mu, log_var = self.encode(imgs)
-        if deterministic:
-            return mu
-        std = torch.exp(0.5 * log_var.clamp(-30.0, 20.0))
-        return mu + std * torch.randn_like(std)
 
     def clear_cache(self):
         self._conv_num = count_conv3d(self.decoder)

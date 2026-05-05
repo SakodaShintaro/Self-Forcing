@@ -227,17 +227,26 @@ def _side_by_side(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
 
 
 def _encode_episode_to_latent(episode_dir: Path, vae, device: torch.device) -> torch.Tensor | None:
-    """Read all rgb_front jpgs for an episode, normalise to [-1, 1], and encode
-    through the Wan VAE. Returns (T_lat, 16, 60, 104) bf16 on CPU, or None if
-    the episode has no usable frames.
+    """Stream-encode an episode's rgb_front jpgs into latents.
 
-    Mirrors scripts/encode_latents.py: pixel frame count must be 1 + 4*N for the
-    encoder, so frames beyond that are dropped.
+    Loads jpgs in chunks (1 frame for the seed call, 4 frames per subsequent
+    call) and encodes through the Wan VAE with a caller-owned cache so neither
+    the pixel buffer nor the latent buffer grows beyond one chunk at a time.
+    Causal state is preserved across chunks via ``vae.make_encoder_cache()``.
+
+    Returns (T_lat, 16, 60, 104) bf16 on CPU, or None if the episode has no
+    usable frames. The encoder requires 1 + 4*N pixel frames; trailing frames
+    that don't fit are dropped.
     """
     rgb_dir = episode_dir / "camera" / "rgb_front"
     paths = sorted(rgb_dir.glob("*.jpg"))
     if not paths:
         return None
+    T_eff = 1 + 4 * ((len(paths) - 1) // 4)
+    if T_eff < 1:
+        return None
+    paths = paths[:T_eff]
+
     transform = transforms.Compose(
         [
             transforms.Resize((480, 832)),
@@ -245,19 +254,25 @@ def _encode_episode_to_latent(episode_dir: Path, vae, device: torch.device) -> t
             transforms.Normalize([0.5] * 3, [0.5] * 3),  # [0,1] -> [-1,1]
         ]
     )
-    frames = [transform(Image.open(p).convert("RGB")) for p in paths]
-    pixels = torch.stack(frames, dim=1).unsqueeze(0)  # (1, 3, T, H, W)
-    pixels = pixels.to(device=device, dtype=torch.bfloat16)
 
-    T = pixels.shape[2]
-    T_eff = 1 + 4 * ((T - 1) // 4)
-    if T_eff < 1:
-        return None
-    if T_eff != T:
-        pixels = pixels[:, :, :T_eff]
+    def _load_chunk(chunk_paths: list[Path]) -> torch.Tensor:
+        frames = [transform(Image.open(p).convert("RGB")) for p in chunk_paths]
+        # frames: list of (3, H, W). Stack -> (3, T, H, W) -> add batch dim.
+        return torch.stack(frames, dim=1).unsqueeze(0).to(device=device, dtype=torch.bfloat16)
 
-    latent = vae.encode_to_latent(pixels)  # (1, T_lat, 16, 60, 104) float32
-    return latent.squeeze(0).to(torch.bfloat16).cpu().contiguous()
+    cache = vae.make_encoder_cache()
+    latents: list[torch.Tensor] = []
+
+    # Seed call: 1 pixel frame -> 1 latent frame.
+    latents.append(vae.encode_chunk(_load_chunk(paths[:1]), cache).cpu())
+
+    # Streaming continuation: 4 pixel frames per call -> 1 latent frame each.
+    n_chunks = (len(paths) - 1) // 4
+    for i in range(n_chunks):
+        s = 1 + 4 * i
+        latents.append(vae.encode_chunk(_load_chunk(paths[s : s + 4]), cache).cpu())
+
+    return torch.cat(latents, dim=1).squeeze(0).to(torch.bfloat16).contiguous()
 
 
 def _list_episodes(b2d_root: Path, source: str) -> list[str]:

@@ -116,13 +116,39 @@ class WanVAEWrapper(torch.nn.Module):
 
     def encode_to_latent(self, pixel: torch.Tensor) -> torch.Tensor:
         # pixel: [batch_size, num_channels, num_frames, height, width]
+        # Each batch item gets a fresh encoder cache → equivalent to standalone
+        # one-shot encode (no state carried across items).
         scale = self._scale(pixel.device, pixel.dtype)
         output = torch.stack(
-            [self.model.encode(u.unsqueeze(0), scale).float().squeeze(0) for u in pixel],
+            [
+                self.model.encode(u.unsqueeze(0), scale, cache=self.model.make_encoder_cache())
+                .float()
+                .squeeze(0)
+                for u in pixel
+            ],
             dim=0,
         )
         # [B, C, T, H, W] -> [B, T, C, H, W]
         return output.permute(0, 2, 1, 3, 4)
+
+    def make_encoder_cache(self):
+        """Allocate a fresh per-session encoder cache for streaming use.
+
+        Pass the returned list to ``encode_chunk()`` repeatedly to encode an
+        episode chunk-by-chunk while preserving causal state across calls.
+        """
+        return self.model.make_encoder_cache()
+
+    def encode_chunk(self, pixel: torch.Tensor, cache: list) -> torch.Tensor:
+        """Encode one chunk of pixels in streaming mode.
+
+        First call (cache freshly allocated) must have shape (B, C, 1+4*N, H, W);
+        subsequent calls in the same session must have (B, C, 4*N, H, W). The
+        cache is mutated in place. Returns latents in (B, T_lat, C_lat, H_lat, W_lat).
+        """
+        scale = self._scale(pixel.device, pixel.dtype)
+        out = self.model.encode(pixel, scale, cache=cache).float()
+        return out.permute(0, 2, 1, 3, 4)
 
     def decode_to_pixel(self, latent: torch.Tensor) -> torch.Tensor:
         # [B, T, C, H, W] -> [B, C, T, H, W]
